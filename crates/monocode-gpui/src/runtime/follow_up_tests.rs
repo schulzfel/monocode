@@ -137,7 +137,7 @@ for line in sys.stdin:
         }
     };
     worker.join().unwrap();
-    assert_eq!(final_status, "Ready");
+    assert_eq!(final_status, SessionStatus::Idle);
     assert!(receipt_seen);
     let saved = locked(&store).unwrap().load(session).unwrap();
     let after = saved.rows.iter().find(|row| row.text == "After").unwrap();

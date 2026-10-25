@@ -1,4 +1,4 @@
-//! GeneralPage and UpdateRow.
+//! GeneralPage and UpdateRow, with the MCP server's groups (`mcp_server`).
 use crate::settings::{SettingsView, widgets::secondary_button};
 use crate::theme::*;
 use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
@@ -240,10 +240,12 @@ impl SettingsView {
                 ],
             ),
         ];
-        vec![
+        let mut page = vec![
             self.group(None, true, "Alerts", None, None, alerts),
             self.group(None, false, "Workspace", None, None, workspace),
-            self.group(None, false, "About", None, None, about),
-        ]
+        ];
+        page.extend(self.mcp_server_groups(cx));
+        page.push(self.group(None, false, "About", None, None, about));
+        page
     }
 }

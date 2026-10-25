@@ -2,7 +2,6 @@
 //! their own project grants, visibility preference and completion bookkeeping.
 use super::*;
 use monocode_core::{
-    agent::Settings,
     app_access as app,
     mono::bridge::{Call, Server},
 };
@@ -14,7 +13,7 @@ mod tests;
 type Placement = Option<(i64, Edge)>;
 enum Effect {
     None,
-    Start(Box<(Session, Settings, bool, bool, Placement)>),
+    Start(Box<(session_launch::Launched, bool, bool, Placement)>),
     Groups(String, monocode_core::session_groups::Groups),
     Archive(i64),
 }
@@ -95,18 +94,16 @@ impl Shell {
                     match effect {
                         Effect::None => (),
                         Effect::Start(start) => {
-                            let (summary, settings, draft, reveal, placement) = *start;
-                            let id = summary.id;
-                            this.draft_sessions.insert(id);
-                            this.sidebar_hidden_sessions.remove(&id);
-                            this.session_worktrees
-                                .insert(id, settings.worktree_cwd.clone());
-                            this.add(summary, cx);
-                            this.started_by.insert(id, call.session);
-                            if let Some(view) = this.sessions.get(&id) {
-                                view.update(cx, |v, cx| v.install_app_launch(settings, !draft, cx));
-                            }
-                            this.app_place_launch(id, placement, reveal, window, cx);
+                            let (launched, draft, reveal, placement) = *start;
+                            let origin = session_launch::Origin::Session(call.session);
+                            this.install_launch(
+                                launched,
+                                origin,
+                                (draft, reveal),
+                                placement,
+                                window,
+                                cx,
+                            );
                         }
                         Effect::Groups(project, groups) => {
                             this.groups.insert(project, groups);
@@ -265,10 +262,12 @@ impl Shell {
         }
         Ok(id)
     }
+    /// Where a launch goes: a new tab, or right of or below
+    /// `besideSessionId`, which defaults to `beside`.
     pub(crate) fn app_placement(
         &self,
         input: &Value,
-        caller: i64,
+        beside: Option<i64>,
         project: &str,
         cx: &App,
     ) -> Result<Placement, String> {
@@ -281,7 +280,7 @@ impl Shell {
         let id = if input.get("besideSessionId").is_some() {
             session_id(input, "besideSessionId", &self.store)?
         } else {
-            caller
+            beside.ok_or("besideSessionId must be an open session pane in this project")?
         };
         if self.workspace.tab_of(id).is_none()
             || self.session_metadata(id, cx).summary.cwd != project
@@ -358,7 +357,7 @@ impl Shell {
                     let prompt = app::prompt(&input)?;
                     let kind = Kind::parse(input["harness"].as_str().unwrap_or(&provider))
                         .ok_or("Unknown harness")?;
-                    let placement = self.app_placement(&input, call.session, &project, cx)?;
+                    let placement = self.app_placement(&input, Some(call.session), &project, cx)?;
                     let mut settings = inherited;
                     if kind.id() != provider {
                         settings.account = crate::accounts::get(cx)
@@ -374,29 +373,23 @@ impl Shell {
                         return;
                     }
                 };
-                let caller = call.session;
-                let request = call.request_id.clone();
-                let fingerprint = app::fingerprint(&action, &input);
+                let launch = session_launch::Launch {
+                    project: project.clone(),
+                    kind,
+                    source_provider: provider,
+                    settings,
+                    input: input.clone(),
+                    prompt,
+                    origin: session_launch::Origin::Session(call.session),
+                    request: call.request_id.clone(),
+                    fingerprint: app::fingerprint(&action, &input),
+                };
                 self.app_background(call,move|store| {
-                    let models=if input.get("model").is_some() || input.get("modelSettings").is_some() || input.get("effort").is_some() {
-                        monocode_core::catalog::models_for(kind,&settings.account)?
-                    }else{monocode_core::catalog::cached_models_for(kind,&settings.account).unwrap_or_default()};
-                    let mut settings=app::launch_settings(&input,&provider,settings,kind,&models)?;
-                    settings.revision=0;
-                    let title=app::optional_text(&input,"title",160)?.unwrap_or_else(||prompt.chars().take(160).collect());
-                    let mut store=locked(&store)?;
-                    let (mut summary,fresh)=store.create_app_session(caller,&request,&fingerprint,kind.id(),&project)?;
-                    if fresh {
-                        if let Err(error)=app::launch_checkout(&input,&project,summary.id,&mut settings) {let _=store.delete(summary.id);return Err(error);}
-                        store.title(summary.id,&title)?;summary.title=title;
-                        store.configure_agent(summary.id,kind.id(),&settings)?;
-                        store.save_started_link(summary.id,caller)?;
-                        store.prepare_app_prompt(summary.id,&request,&prompt)?;
-                        summary.has_messages=true;
-                    }
+                    let launched=session_launch::launch_session(&store,launch)?;
+                    let (id,model)=(launched.summary.id,launched.settings.model.clone());
                     let draft=input["draft"].as_bool().unwrap_or(false);let reveal=input["reveal"].as_bool().unwrap_or(false);
-                    let value=json!({"id":summary.id,"sessionId":summary.id,"cwd":project,"harness":kind.id(),"model":settings.model,"submitted":!draft,"draft":draft,"accepted":true});
-                    Ok((value,if fresh {Effect::Start(Box::new((summary,settings,draft,reveal,placement)))}else{Effect::None}))
+                    let value=json!({"id":id,"sessionId":id,"cwd":project,"harness":kind.id(),"model":model,"submitted":!draft,"draft":draft,"accepted":true});
+                    Ok((value,if launched.fresh {Effect::Start(Box::new((launched,draft,reveal,placement)))}else{Effect::None}))
                 },cx);
                 return;
             }
@@ -434,38 +427,27 @@ impl Shell {
                     Err(e) => Err(e),
                     Ok((id, view)) => {
                         if action == "sessions.delete" {
-                            self.delete_session(id, window, cx);
-                            if !self.deleting.contains(&id) {
-                                self.finish_app_call(
+                            match self.delete_session_checked(id, window, cx) {
+                                Err(error) => self.finish_app_call(
                                     call,
-                                    Err(self
-                                        .error
-                                        .clone()
-                                        .unwrap_or("Could not delete session".into())),
+                                    Err(error.unwrap_or("Could not delete session".into())),
                                     cx,
-                                );
-                                return;
-                            }
-                            let deleting = self.group_writes.take();
-                            let store = self.store.clone();
-                            self.group_writes = Some(cx.spawn(async move |this, cx| {
-                                if let Some(deleting) = deleting {
-                                    deleting.await;
-                                }
-                                let result = cx
-                                    .background_executor()
-                                    .spawn(async move {
-                                        if locked(&store)?.sessions()?.iter().any(|s| s.id == id) {
-                                            Err("Could not delete session; its data was preserved"
-                                                .into())
-                                        } else {
-                                            Ok(json!({"sessionId":id,"deleted":true}))
-                                        }
+                                ),
+                                Ok(deleted) => cx
+                                    .spawn(async move |this, cx| {
+                                        let result = deleted.await.and_then(|deleted| {
+                                            if deleted {
+                                                Ok(json!({"sessionId":id,"deleted":true}))
+                                            } else {
+                                                Err("Could not delete session; its data was preserved".into())
+                                            }
+                                        });
+                                        let _ = this.update(cx, |this, cx| {
+                                            this.finish_app_call(call, result, cx);
+                                        });
                                     })
-                                    .await;
-                                let _ = this
-                                    .update(cx, |this, cx| this.finish_app_call(call, result, cx));
-                            }));
+                                    .detach(),
+                            }
                             return;
                         } else if action == "sessions.archive" {
                             view.update(cx, |v, cx| v.stop_app_session(cx));
@@ -540,40 +522,26 @@ impl Shell {
             "folders.list" => Ok(
                 json!({"cwd":project,"folders":self.groups.get(&project).cloned().unwrap_or_default().folders.iter().map(|f|json!({"id":f.id,"name":f.name,"sessionIds":f.session_ids})).collect::<Vec<_>>()}),
             ),
-            "folders.move" => match self.app_target(&input, call.session, &project, false, cx) {
-                Err(e) => Err(e),
-                Ok(id) => {
-                    let mut groups = self.groups.get(&project).cloned().unwrap_or_default();
-                    let folder = app::optional_text(&input, "folderId", 256);
-                    let name = app::optional_text(&input, "newFolderName", 100);
-                    match folder.and_then(|f| name.map(|n| (f, n))) {
-                        Err(e) => Err(e),
-                        Ok((folder, name)) => {
-                            if folder.is_some() == name.is_some() {
-                                Err("Supply exactly one of folderId or newFolderName".into())
-                            } else {
-                                let folder = if let Some(name) = name {
-                                    let folder = groups
-                                        .create_folder(&[id], monocode_core::mono::new_id())
-                                        .unwrap();
-                                    groups.rename_folder(&folder, &name);
-                                    folder
-                                } else {
-                                    folder.unwrap()
-                                };
-                                if groups.folder(&folder).is_none() {
-                                    Err("Folder not found".into())
-                                } else {
-                                    groups.add_to_folder(&folder, id);
-                                    let name = groups.folder(&folder).unwrap().name.clone();
-                                    self.app_background(call,move|store|{locked(&store)?.save_groups(&project,&groups)?;Ok((json!({"sessionId":id,"folderId":folder,"folderName":name}),Effect::Groups(project,groups)))},cx);
-                                    return;
-                                }
+            "folders.move" => {
+                match self.app_target(&input, call.session, &project, false, cx) {
+                    Err(e) => Err(e),
+                    Ok(id) => {
+                        let mut groups = self.groups.get(&project).cloned().unwrap_or_default();
+                        let folder = app::optional_text(&input, "folderId", 256);
+                        let name = app::optional_text(&input, "newFolderName", 100);
+                        match folder
+                            .and_then(|f| name.map(|n| (f, n)))
+                            .and_then(|(f, n)| session_admin::move_to_folder(&mut groups, id, f, n))
+                        {
+                            Err(e) => Err(e),
+                            Ok((folder, name)) => {
+                                self.app_background(call,move|store|{locked(&store)?.save_groups(&project,&groups)?;Ok((json!({"sessionId":id,"folderId":folder,"folderName":name}),Effect::Groups(project,groups)))},cx);
+                                return;
                             }
                         }
                     }
                 }
-            },
+            }
             "worktrees.list" | "worktrees.create" => {
                 self.app_background(
                     call,

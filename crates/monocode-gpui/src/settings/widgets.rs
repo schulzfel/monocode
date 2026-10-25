@@ -251,6 +251,7 @@ impl SettingsView {
                 id,
                 "sounds"
                     | "notifications"
+                    | "mcp-server"
                     | "tab-animations"
                     | "notes"
                     | "quick-composer"

@@ -15,6 +15,7 @@ pub(crate) mod phases;
 mod remote_plans;
 pub(crate) mod selection;
 pub(crate) mod tasks;
+mod tool_caption;
 mod tools;
 mod visuals;
 
@@ -394,7 +395,7 @@ pub(crate) fn mono_work_label(source: &[Row], group: usize) -> String {
         }
         .into();
     }
-    match tool.summary().0.as_str() {
+    match tool.builtin_summary().unwrap_or_default().0.as_str() {
         "Run" => "Running command…",
         "Edit" | "Write" => "Editing file…",
         "Read" => "Reading file…",
@@ -711,14 +712,7 @@ impl TranscriptView {
                     .collect();
                 serde_json::from_str::<ToolCall>(&text).ok()
             })
-            .map(|tool| {
-                let shown = tool.presentation_in(Some(cwd));
-                [shown.action, shown.target]
-                    .into_iter()
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
+            .map(|tool| tool.presentation_in(Some(cwd)).label())
             .filter(|label| !label.is_empty());
         let duration = self
             .turns

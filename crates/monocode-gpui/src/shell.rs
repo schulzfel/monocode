@@ -7,6 +7,7 @@ mod classic_sidebar;
 #[cfg(test)]
 mod classic_surface_tests;
 mod classic_surfaces;
+mod control;
 mod file_panes;
 mod idle_agents;
 #[cfg(test)]
@@ -27,9 +28,11 @@ mod rails;
 mod remote_projects;
 mod remote_sessions;
 mod search;
+mod session_admin;
 mod session_filters;
 mod session_folders;
 mod session_groups;
+mod session_launch;
 mod session_loading;
 mod session_preview;
 mod session_shortcuts;
@@ -37,8 +40,11 @@ mod settings;
 mod shortcuts;
 mod sidebar_list;
 mod sidebar_peek;
+mod tab_actions;
 mod terminal_dock;
 mod title_tabs;
+mod transfer;
+mod ui_setters;
 mod worktrees;
 
 use crate::{
@@ -538,6 +544,8 @@ pub(crate) struct Shell {
     mobile: mobile_host::Mobile,
     app_results: HashMap<(i64, String), (String, Result<serde_json::Value, String>)>,
     app_pending: HashSet<(i64, String)>,
+    /// External control (MCP): policy, listener and pending approvals.
+    control: control::Control,
     orchestrations: HashMap<i64, orchestration::Run>,
     /// Each lead's last orchestration, whose agents hang under it in the sidebar.
     orchestration_summaries: HashMap<i64, monocode_core::orchestration::Summary>,
@@ -900,6 +908,7 @@ impl Shell {
             mobile: mobile_host::Mobile::default(),
             app_results: HashMap::new(),
             app_pending: HashSet::new(),
+            control: control::Control::default(),
             orchestrations: HashMap::new(),
             orchestration_summaries: sidebar_metadata.orchestrations,
             started_by: sidebar_metadata.started_by,
@@ -1147,6 +1156,7 @@ impl Shell {
         this.monos = Some(monos);
         this.bind_notices(cx);
         this.init_app_bridge(cx);
+        this.init_control(cx);
         for summary in summaries {
             if this
                 .monos
@@ -1271,6 +1281,7 @@ impl Shell {
                 this.sync_review_locks(cx);
                 this.refresh_session_mark(id, cx);
                 this.notification_session_changed(id, cx);
+                this.control_session_changed(id, cx);
                 this.update_usage_provider(cx);
                 this.update_chat_visibility(cx);
                 this.invalidate_chrome(cx);
@@ -1278,7 +1289,7 @@ impl Shell {
             }));
         self.observations
             .push(cx.subscribe(&view, |this, _, transfer: &Transfer, cx| {
-                this.transfer_response(transfer.clone(), cx)
+                this.transfer_response(transfer.clone(), cx).detach();
             }));
         self.observations.push(cx.subscribe(
             &view,
@@ -1305,6 +1316,7 @@ impl Shell {
         if !self.order.contains(&id) {
             self.order.push(id);
         }
+        self.control_session_loaded(cx);
     }
     /// SessionPane's reviewUndoLocked: another running session shares the checkout.
     fn sync_review_locks(&mut self, cx: &mut Context<Self>) {
@@ -1364,113 +1376,10 @@ impl Shell {
         self.tab_marks[&id].update(cx, |mark, cx| mark.set(&provider, tab_state, cx));
     }
     fn toggle_archive(&mut self, id: i64, cx: &mut Context<Self>) {
-        if !self.archiving.insert(id) {
-            return;
-        }
-        self.close_preview(cx);
         let archived = !self.session_metadata(id, cx).summary.archived;
-        let store = self.store.clone();
-        let work = cx
-            .background_executor()
-            .spawn(async move { locked(&store)?.set_archived(id, archived) });
-        cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.archiving.remove(&id);
-                match result {
-                    Ok(()) => {
-                        if let Some(summary) = this.session_summaries.get_mut(&id) {
-                            summary.archived = archived;
-                        }
-                        if let Some(view) = this.sessions.get(&id) {
-                            view.update(cx, |session, cx| {
-                                session.summary.archived = archived;
-                                if archived {
-                                    session.stop_if_busy(cx);
-                                }
-                            });
-                        }
-                        this.refresh_session_mark(id, cx);
-                        if archived && this.workspace.tab_of(id).is_some() {
-                            this.close_pane(id, window, cx);
-                        } else {
-                            this.invalidate_chrome(cx);
-                            cx.notify();
-                        }
-                    }
-                    Err(error) => {
-                        this.error = Some(format!("Could not update archive: {error}"));
-                        this.invalidate_chrome(cx);
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
-        self.invalidate_chrome(cx);
-    }
-    fn transfer_response(&mut self, transfer: Transfer, cx: &mut Context<Self>) {
-        use monocode_core::{
-            agent::{Handoff, Settings},
-            response::{self, TransferKind},
-        };
-        let navigation_revision = self.navigation_revision;
-        let store = self.store.clone();
-        let target_kind = Kind::from_id(&transfer.target.provider);
-        let account = crate::accounts::get(cx)
-            .map(|center| center.read(cx).selected(target_kind, &transfer.cwd))
-            .unwrap_or_default();
-        let work = cx.background_executor().spawn(async move {
-            let mut settings = Settings {
-                account,
-                revision: response::now_ms() * 1_000_000,
-                model: transfer.target.model.clone(),
-                effort: transfer.target.effort.clone(),
-                model_settings: transfer.target.settings.clone(),
-                access: transfer.settings.access,
-                worktree_cwd: transfer.settings.worktree_cwd.clone(),
-                ..Settings::default()
-            };
-            let prompt = if transfer.kind == TransferKind::SecondOpinion {
-                Some(response::second_opinion(&transfer.from, &transfer.turn))
-            } else {
-                settings.handoff = Some(Handoff {
-                    from: transfer.from.clone(),
-                    brief: response::handoff(&transfer.through),
-                });
-                None
-            };
-            let mut summary = locked(&store)?.create(&transfer.target.provider, &transfer.cwd)?;
-            summary.title = if transfer.kind == TransferKind::SecondOpinion {
-                "Second opinion".into()
-            } else {
-                transfer.title
-            };
-            locked(&store)?.title(summary.id, &summary.title)?;
-            locked(&store)?.configure_agent(summary.id, &summary.provider, &settings)?;
-            Ok::<_, String>((summary, settings, prompt))
-        });
-        cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok((summary, settings, prompt)) => {
-                    let id = summary.id;
-                    this.add(summary, cx);
-                    this.sessions[&id]
-                        .update(cx, |view, cx| view.install_transfer(settings, prompt, cx));
-                    this.order.retain(|s| *s != id);
-                    this.order.insert(0, id);
-                    if this.navigation_revision == navigation_revision {
-                        this.activate_session(id, window, cx);
-                    }
-                }
-                Err(error) => {
-                    this.error = Some(error);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        if let Some(task) = self.set_session_archived(id, archived, cx) {
+            task.detach();
+        }
     }
     fn notify_sidebar(&self, cx: &mut Context<Self>) {
         self.sidebar_list.invalidate_structure();
@@ -3737,6 +3646,7 @@ impl Shell {
         self.update_usage_provider(cx);
         self.sync_right_panel(cx);
         self.invalidate_chrome(cx);
+        self.control_workspace_changed(cx);
         let state = serde_json::to_string(&self.workspace).unwrap();
         *self.latest_state.lock().unwrap_or_else(|e| e.into_inner()) = state.clone();
         let revision = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -4168,50 +4078,21 @@ impl Shell {
         if only_if_empty && !self.pending_project_blanks.insert(blank_key.clone()) {
             return;
         }
-        let model = self
-            .workspace
-            .preferences
-            .project_providers
-            .get(&cwd)
-            .and_then(|p| p.models.get(kind.id()))
-            .or(self.workspace.preferences.default_models.get(kind.id()))
-            .cloned();
         let navigation_revision = self.navigation_revision;
-        let account = crate::accounts::get(cx)
-            .map(|center| center.read(cx).selected(kind, &cwd))
-            .unwrap_or_default();
-        let access = crate::conversation::default_access(cx);
-        let effort = crate::conversation::preferred_effort(kind.id(), cx);
+        let new_chat = self.new_chat(kind, &cwd, cx);
         let work = cx.background_executor().spawn({
-            let cwd = cwd.clone();
             let worktree_cwd = focus.as_ref().map(|f| f.path.clone());
             async move {
                 let store = locked(&store)?;
-                let summary = store.create(kind.id(), &cwd)?;
-                let mut settings = session_loading::new_session_settings(
-                    store
-                        .desktop_preferences()
-                        .and_then(|preferences| preferences.session_defaults(kind.id(), &cwd)),
-                    model,
-                );
-                settings.access = access;
-                if let Some(effort) = effort {
-                    settings.model_settings.retain(|key, _| {
-                        !matches!(
-                            key.as_str(),
-                            "effort" | "reasoning" | "reasoningEffort" | "reasoning_effort"
-                        )
-                    });
-                    settings.effort = Some(effort);
-                }
-                settings.account = account;
+                let summary = store.create(kind.id(), &new_chat.cwd)?;
+                let mut settings = new_chat.settings(&store);
                 settings.worktree_cwd = worktree_cwd;
                 if settings.model.is_some()
                     || settings.effort.is_some()
                     || !settings.model_settings.is_empty()
                     || settings.worktree_cwd.is_some()
                     || settings.account.id != monocode_core::accounts::DEFAULT
-                    || access != Default::default()
+                    || new_chat.access != Default::default()
                 {
                     store.save_agent_settings(summary.id, &settings)?;
                 }
@@ -7988,23 +7869,7 @@ impl Render for Shell {
             }))
             .on_action(
                 cx.listener(|this, event: &crate::file_editor::OpenPath, window, cx| {
-                    let cwd = this.git.read(cx).project().to_owned();
-                    let (path, location) = crate::file_editor::file_location(&event.0, &cwd);
-                    this.open_review(crate::review::ReviewTab::File { cwd, path }, window, cx);
-                    // Monos render above the session pane tree. Give its file
-                    // an independent visible tab using the normal navigation
-                    // path, which retains the Mono tab and live conversation.
-                    if this.mono_active(cx)
-                        && let Some(owner) = this.workspace.active
-                        && let Some(pane) = this.independent_file_pane(owner, cx)
-                    {
-                        this.open_file_pane(pane, window, cx);
-                    }
-                    if let Some((line, column)) = location
-                        && let Some(pane) = this.active_review(cx)
-                    {
-                        pane.update(cx, |pane, cx| pane.navigate_file(line, column, cx));
-                    }
+                    this.open_path(&event.0, window, cx)
                 }),
             )
             .on_action(
@@ -8070,40 +7935,7 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &NewClaude, _, cx| this.create(Kind::Claude, cx)))
             .on_action(cx.listener(|this, _: &OpenProject, _, cx| this.open_project(cx)))
-            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                if let Some(view) = this.active_app_view.filter(|_| this.settings.is_none()) {
-                    if this.workspace.classic_layout {
-                        this.close_app_view(window, cx);
-                    } else {
-                        this.close_title_tabs(&[TitleTab::App(view)], None, window, cx);
-                    }
-                    return;
-                }
-                if this.app_search.is_some() {
-                    this.close_search_tab(window, cx);
-                    return;
-                }
-                if let Some(TitleTab::Mono { id, .. }) = this.active_title_tab(cx) {
-                    this.close_mono_tab(&id, window, cx);
-                    return;
-                }
-                // ⌘W in the focused dock closes its terminal.
-                if let Some(ix) = this.dock_focused(window, cx) {
-                    this.close_terminal(ix, window, cx);
-                    return;
-                }
-                // A focused review closes its tab first, as a focused file pane does.
-                if this.review_focused
-                    && let Some(review) = this.active_review(cx)
-                {
-                    review.update(cx, |r, cx| r.close_active(cx));
-                    return;
-                }
-                if let Some(id) = this.workspace.active {
-                    // Close Pane (⌘W) in a split; the whole tab otherwise.
-                    this.close_pane(id, window, cx);
-                }
-            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| this.close_tab(window, cx)))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousTab, window, cx| this.cycle(-1, window, cx)))
             .on_action(cx.listener(|this, _: &VisitBack, window, cx| this.visit(-1, window, cx)))

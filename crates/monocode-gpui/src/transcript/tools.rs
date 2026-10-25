@@ -1,5 +1,5 @@
 //! Compact semantic tool captions with clickable file targets.
-use super::{TranscriptView, tasks};
+use super::{TranscriptView, tasks, tool_caption};
 use crate::{markdown, theme::*};
 use gpui::{AnyElement, Context, Div, Role, div, prelude::*, px, rgb};
 use monocode_core::tool::{CommandStep, ToolCall, ToolState};
@@ -122,10 +122,10 @@ impl TranscriptView {
         }
         let shown = tool.presentation_in(self.file_link_base.as_deref());
         let failed = matches!(tool.state, ToolState::Failed | ToolState::Cancelled);
-        let is_search =
-            matches!(shown.action.as_str(), "Find" | "Search") && !shown.target.is_empty();
+        let builtin = shown.builtin_action();
+        let is_search = matches!(builtin, Some("Find" | "Search")) && !shown.target.is_empty();
         let action = if is_search { "Search" } else { &shown.action };
-        let is_file = matches!(shown.action.as_str(), "Read" | "Edit" | "Write" | "List");
+        let is_file = matches!(builtin, Some("Read" | "Edit" | "Write" | "List"));
         let target_path = if is_file {
             shown.file_path.as_deref().map(|path| {
                 let (path, location) = crate::file_editor::file_location(
@@ -154,16 +154,8 @@ impl TranscriptView {
             }
         };
         let chain = shown.action == "Run" && !shown.steps.is_empty();
-        let caption = match (&shown.description, chain) {
-            (Some(description), true) => description.clone(),
-            _ => format!("{action} {}", shown.target),
-        };
-        let state_label = match tool.state {
-            ToolState::Running => "Running",
-            ToolState::Completed => "Completed",
-            ToolState::Failed => "Failed",
-            ToolState::Cancelled => "Cancelled",
-        };
+        let caption = tool_caption::caption(action, &shown, chain);
+        let source = tool_caption::source(&shown, start);
         // Chained commands and failures share one disclosure: steps, then error.
         let error_key = format!("tool-detail:{start}:{}", tool.id);
         let error_open = self.agent_panels.part_open(&error_key, false);
@@ -218,7 +210,7 @@ impl TranscriptView {
             .id(gpui::SharedString::from(format!("tool:{identity}")))
             .debug_selector(move || format!("tool-{start}"))
             .role(Role::Group)
-            .aria_label(format!("{state_label} tool call: {caption}"))
+            .aria_label(tool_caption::aria_label(&tool.state, &caption))
             .flex()
             .w_full()
             .min_w_0()
@@ -239,6 +231,7 @@ impl TranscriptView {
                         })
                         .child(action.to_owned()),
                 )
+                .children(source)
             })
             .child(
                 div().min_w_0().flex_1().flex().child(

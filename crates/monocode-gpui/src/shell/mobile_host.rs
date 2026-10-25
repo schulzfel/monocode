@@ -1089,24 +1089,7 @@ impl Shell {
                 Ok(reply)
             }
             ("session.rename", Target::Session(id)) => {
-                let title = params["title"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_owned();
-                if title.is_empty() || title.chars().count() > 200 {
-                    return Err("Enter a title under 200 characters".into());
-                }
-                let id = *id;
-                if let Some(summary) = self.session_summaries.get_mut(&id) {
-                    summary.title = title.clone();
-                }
-                if let Some(view) = self.sessions.get(&id) {
-                    view.update(cx, |v, cx| v.rename(title.clone(), cx));
-                }
-                self.store_write("rename the session", cx, move |s| s.title(id, &title));
-                self.invalidate_chrome(cx);
-                cx.notify();
+                self.rename_session(*id, params["title"].as_str().unwrap_or_default(), cx)?;
                 Ok(reply)
             }
             ("session.archive", Target::Session(id)) => {

@@ -16,8 +16,8 @@ pub(super) struct FollowUps {
     pub edit: Option<QueueEdit>,
 }
 pub(super) struct QueueEdit {
-    id: String,
-    input: Entity<input::Input>,
+    pub(super) id: String,
+    pub(super) input: Entity<input::Input>,
     _submit: Subscription,
 }
 
@@ -78,9 +78,10 @@ impl Conversation {
                     }
                     Err(error) if this.follow_ups.state.revision == revision => {
                         this.follow_ups.state.paused = true;
-                        this.status = format!("Could not save messages: {error}");
+                        this.status =
+                            SessionStatus::error(format!("Could not save messages: {error}"));
                         if let Some(head) = this.follow_ups.state.messages.first_mut() {
-                            head.error = Some(this.status.clone());
+                            head.error = Some(this.status.to_string());
                         }
                     }
                     Err(_) => {}
@@ -98,16 +99,27 @@ impl Conversation {
         mode: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.enqueue_steered(prompt, mode, None, cx);
+    }
+    /// [`Self::enqueue_follow_up`], with `steer` choosing whether the message
+    /// steers the running turn instead of the follow-up preference.
+    pub(super) fn enqueue_steered(
+        &mut self,
+        prompt: String,
+        mode: Option<String>,
+        steer: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
         let attachments = std::mem::take(&mut self.attachments);
         let mut message = self.message(prompt, attachments, mode, cx);
         // Once the agent has answered and only background work is left, which
         // may never end (a dev server), queuing would park the message behind
         // it, so hand it to the agent now.
-        message.steer = (cx
-            .try_global::<crate::settings::Preferences>()
-            .is_none_or(|prefs| prefs.follow_up == "steer")
-            || !self.background.tasks.is_empty())
-            && Kind::from_id(&self.summary.provider).can_steer()
+        message.steer = steer.unwrap_or_else(|| {
+            cx.try_global::<crate::settings::Preferences>()
+                .is_none_or(|prefs| prefs.follow_up == "steer")
+                || !self.background.tasks.is_empty()
+        }) && Kind::from_id(&self.summary.provider).can_steer()
             && message.can_steer();
         self.follow_ups.motion.insert(
             &message.id,
@@ -356,7 +368,7 @@ impl Conversation {
             self.launch_message(message, cx);
             self.settings.mono_message_id = None;
             if !self.busy {
-                self.fail_follow_up(&message_id, self.status.clone(), cx);
+                self.fail_follow_up(&message_id, self.status.to_string(), cx);
             }
         }
         cx.notify();
@@ -390,24 +402,7 @@ impl Conversation {
             self.settings.orchestrator,
         ) = previous;
     }
-    fn resume_queue(&mut self, cx: &mut Context<Self>) {
-        if self.stopping {
-            self.defer_history_action(|this, cx| this.resume_queue(cx), cx);
-            return;
-        }
-        if self.busy || !self.follow_ups.state.paused || self.follow_ups.state.messages.is_empty() {
-            return;
-        }
-        // Resume the interrupted provider turn before releasing its outbox,
-        // matching App.tsx's queueStatus = "resuming" continuation.
-        self.follow_ups.resuming = true;
-        self.launch_prompt("Continue from where you left off.".into(), cx);
-        if !self.busy {
-            self.follow_ups.resuming = false;
-        }
-        cx.notify();
-    }
-    fn edit_queued(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn edit_queued(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.follow_ups.sending.as_ref() == Some(&id) {
             return;
         }
@@ -439,7 +434,12 @@ impl Conversation {
         });
         cx.notify();
     }
-    fn finish_queue_edit(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn finish_queue_edit(
+        &mut self,
+        save: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(edit) = &self.follow_ups.edit else {
             return;
         };
@@ -447,20 +447,9 @@ impl Conversation {
             return;
         }
         if save {
-            let text = edit.input.read(cx).content.to_string();
-            let prepared = self.completion.read(cx).prepare_prompt(&text);
-            if let Some(message) = self
-                .follow_ups
-                .state
-                .messages
-                .iter_mut()
-                .find(|m| m.id == edit.id)
-            {
-                if text.trim().is_empty() && message.attachments.is_empty() {
-                    return;
-                }
-                message.replace_text(text, prepared);
-                message.error = None;
+            let (id, text) = (edit.id.clone(), edit.input.read(cx).content.to_string());
+            if !self.replace_queued_text(&id, text, cx) {
+                return;
             }
         }
         self.follow_ups.edit = None;
@@ -498,7 +487,7 @@ impl Conversation {
                 div().h(px(28.)).flex().items_center().gap_2().border_b_1().border_color(content(0.1))
                     .child(icon("queue-pause", 14.))
                     .child(div().flex_1().min_w_0().truncate().child(if failed { "A message couldn't be sent" } else { "Queue paused because you interrupted" }))
-                    .child(queue_button("queue-resume", if failed { "Retry queue" } else { "Resume queue" }, "queue-play").w_auto().px(px(6.)).gap(px(6.)).child(if failed { "Retry" } else { "Resume" }).on_click(cx.listener(|this, _, _, cx| this.resume_queue(cx))))
+                    .child(queue_button("queue-resume", if failed { "Retry queue" } else { "Resume queue" }, "queue-play").w_auto().px(px(6.)).gap(px(6.)).child(if failed { "Retry" } else { "Resume" }).on_click(cx.listener(|this, _, _, cx| this.queue_resume(cx))))
             ))
             .children(self.follow_ups.state.messages.iter().enumerate().map(|(index, message)| {
                 let id = message.id.clone();
@@ -513,24 +502,9 @@ impl Conversation {
                     } else {
                         let (steer, edit, remove) = (id.clone(), id.clone(), id);
                         row.child(div().flex_1().min_w_0().py_1().child(div().id("queued-message-text").role(Role::Label).aria_label(message.label()).truncate().text_color(content(0.75)).child(message.label())).when_some(message.error.clone(), |d, error| d.child(div().id("queue-error").role(Role::Alert).text_color(gpui::rgb(0xf87171)).child(error))))
-                            .when(Kind::from_id(&self.summary.provider).can_steer(), |d| d.child(queue_button("queue-steer", "Steer queued message", "queue-steer").w_auto().px_2().gap(px(6.)).opacity(if sending { 0.4 } else { 1. }).child("Steer").on_click(cx.listener(move |this, _, _, cx| {
-                                if !sending && let Some(message) = this.follow_ups.state.messages.iter_mut().find(|m| m.id == steer) {
-                                    if !message.can_steer() && this.busy { return; }
-                                    message.steer = true;
-                                    message.error = None;
-                                    this.follow_ups.requested = Some(steer.clone());
-                                    this.save_follow_ups(cx);
-                                }
-                            }))))
+                            .when(Kind::from_id(&self.summary.provider).can_steer(), |d| d.child(queue_button("queue-steer", "Steer queued message", "queue-steer").w_auto().px_2().gap(px(6.)).opacity(if sending { 0.4 } else { 1. }).child("Steer").on_click(cx.listener(move |this, _, _, cx| { if !sending { let _ = this.queue_steer(&steer, cx); } }))))
                             .child(queue_button("queue-edit", "Edit queued message", "pencil-edit").opacity(if sending { 0.4 } else { 1. }).on_click(cx.listener(move |this, _, window, cx| { if !sending { this.edit_queued(edit.clone(), window, cx); } })))
-                            .child(queue_button("queue-remove", "Remove queued message", "trash").opacity(if sending { 0.4 } else { 1. }).on_click(cx.listener(move |this, _, _, cx| {
-                                if !sending {
-                                    this.follow_ups.state.messages.retain(|m| m.id != remove);
-                                    this.follow_ups.continuations.retain(|id| id != &remove);
-                                    if this.follow_ups.requested.as_ref() == Some(&remove) { this.follow_ups.requested = this.follow_ups.continuations.front().cloned(); }
-                                    this.save_follow_ups(cx);
-                                }
-                            })))
+                            .child(queue_button("queue-remove", "Remove queued message", "trash").opacity(if sending { 0.4 } else { 1. }).on_click(cx.listener(move |this, _, _, cx| { if !sending { let _ = this.queue_remove(&remove, cx); } })))
                     })
                     .map(|row| self.follow_ups.motion.row(&message.id, row, row_width, window))
             }));
@@ -547,6 +521,7 @@ fn queue_button(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .debug_selector(move || id.into())
         .role(Role::Button)
         .aria_label(label)
         .size(px(24.))

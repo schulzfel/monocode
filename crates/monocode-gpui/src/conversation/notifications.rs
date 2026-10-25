@@ -59,7 +59,8 @@ impl Conversation {
             return false;
         }
         let Some(controls) = &self.controls else {
-            self.status = "The provider is no longer waiting for this approval".into();
+            self.status =
+                SessionStatus::error("The provider is no longer waiting for this approval");
             cx.notify();
             return false;
         };
@@ -70,19 +71,19 @@ impl Conversation {
             })
             .is_err()
         {
-            self.status = "The provider is no longer waiting for this approval".into();
+            self.status =
+                SessionStatus::error("The provider is no longer waiting for this approval");
             cx.notify();
             return false;
         }
         self.approvals.remove(index);
         self.status = if !self.approvals.is_empty() {
-            "Waiting for approval"
+            SessionStatus::AwaitingApproval
         } else if !self.questions.is_empty() {
-            "Waiting for your answer"
+            SessionStatus::AwaitingAnswer
         } else {
-            "Working…"
-        }
-        .into();
+            SessionStatus::Working(None)
+        };
         // Request-level observers need an update even if another request remains.
         cx.emit(SessionChanged);
         cx.notify();

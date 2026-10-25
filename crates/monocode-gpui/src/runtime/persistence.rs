@@ -269,7 +269,7 @@ mod tests {
         );
         let result = rx.try_recv().unwrap();
         assert!(result.finished);
-        assert_eq!(result.status, "Ready");
+        assert_eq!(result.status, SessionStatus::Idle);
         assert_eq!(result.start, history.rows.len());
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[0].text, "Accepted before stopping");
@@ -301,7 +301,7 @@ mod tests {
         );
         let result = rx.try_recv().unwrap();
         assert!(result.finished);
-        assert!(result.status.contains("worktree"));
+        assert!(result.status.to_string().contains("worktree"));
         assert!(result.rows.is_empty());
         assert!(
             result.delivered.is_none(),
@@ -366,7 +366,10 @@ mod tests {
         );
         let first = rx.try_recv().unwrap();
         assert!(!first.finished);
-        assert_eq!(first.status, "Creating worktree…");
+        assert_eq!(
+            first.status,
+            SessionStatus::Connecting(Preparing::CreatingWorktree)
+        );
         assert_eq!(first.rows[0].text, "Create the checkout");
         assert!(first.worktree_cwd.is_none());
         let created = rx.try_recv().unwrap();

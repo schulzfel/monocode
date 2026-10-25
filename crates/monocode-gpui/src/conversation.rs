@@ -1,4 +1,5 @@
 mod accounts;
+mod answers;
 mod approvals;
 mod attachment_drop;
 mod background_tasks;
@@ -6,6 +7,7 @@ mod btw;
 mod commands;
 pub(crate) mod composer_features;
 mod composer_shelf;
+mod control;
 mod edit_last_turn;
 mod follow_up;
 pub(crate) mod git_actions;
@@ -13,9 +15,11 @@ mod history;
 mod mobile;
 mod mono;
 mod notifications;
+mod queue;
 mod remote;
 pub(crate) mod remote_plans;
 mod response_menu;
+mod status;
 #[cfg(test)]
 mod submission_tests;
 mod title;
@@ -36,6 +40,8 @@ use crate::{
     transcript::TranscriptView,
 };
 pub(crate) use accounts::UsageResumed;
+pub(crate) use answers::AnswerRefused;
+pub(crate) use control::reply as control_reply;
 use gpui::{
     AnyElement, Context, CursorStyle, Entity, EventEmitter, Focusable, MouseButton, Role,
     SharedString, StyleRefinement, Subscription, Window, canvas, div, prelude::*, px,
@@ -48,6 +54,8 @@ use monocode_core::{
     catalog::{self, Model},
 };
 use monocode_core::{provider::Kind, store::Session};
+pub(crate) use queue::QueueRefused;
+pub(crate) use status::{Preparing, SessionStatus};
 use std::{
     path::Path,
     sync::{
@@ -163,7 +171,7 @@ pub(crate) struct Conversation {
     pub(crate) orchestration_plan: Option<monocode_core::orchestration::Plan>,
     orchestration_error: Option<String>,
     pub(crate) orchestration_progress: Option<String>,
-    status: String,
+    status: SessionStatus,
     loaded: bool,
     history_unloaded: bool,
     history_actions: std::collections::VecDeque<history::HistoryAction>,
@@ -596,7 +604,7 @@ impl Conversation {
             orchestration_plan: None,
             orchestration_error: None,
             orchestration_progress: None,
-            status: "Loading conversation…".into(),
+            status: SessionStatus::Loading,
             loaded: false,
             history_unloaded: false,
             history_actions: Default::default(),
@@ -751,7 +759,7 @@ impl Conversation {
                             .update(cx, |view, cx| view.set_saved_draft(draft, cx));
                     }
                     Err(error) => {
-                        this.status = error;
+                        this.status = SessionStatus::error(error);
                         return;
                     }
                 }
@@ -794,7 +802,7 @@ impl Conversation {
                             v.install_prepared_history(history, cx);
                             v.set_history_pager(before.ok().flatten(), Some(pager));
                         });
-                        this.status = "Ready".into();
+                        this.status = SessionStatus::Idle;
                         this.loaded = true;
                         if let Some((row, query)) = this.pending_search.take() {
                             this.reveal_search(row, query, cx);
@@ -803,7 +811,7 @@ impl Conversation {
                         this.run_history_actions(cx);
                         this.pump_follow_ups(cx);
                     }
-                    Err(e) => this.status = e,
+                    Err(e) => this.status = SessionStatus::error(e),
                 }
                 this.mono_flush_external(cx);
                 cx.emit(SessionChanged);
@@ -873,7 +881,8 @@ impl Conversation {
             return;
         }
         if self.settings.worktree_removed {
-            self.status = "Select a branch or worktree to continue this conversation.".into();
+            self.status =
+                SessionStatus::error("Select a branch or worktree to continue this conversation.");
             cx.notify();
             return;
         }
@@ -1019,12 +1028,12 @@ impl Conversation {
         let generation = self.submission_generation;
         let source_provider = self.summary.provider.clone();
         let source_account = self.settings.account.id.clone();
-        self.status = if self.settings.pending_provider_switch.is_some() {
-            "Preparing handoff…"
-        } else {
-            "Connecting…"
-        }
-        .into();
+        self.status =
+            SessionStatus::Connecting(if self.settings.pending_provider_switch.is_some() {
+                Preparing::Handoff
+            } else {
+                Preparing::Connecting
+            });
         self.cancel = Arc::new(AtomicBool::new(false));
         let summary = self.summary.clone();
         let store = self.store.clone();
@@ -1085,7 +1094,7 @@ impl Conversation {
         self.preparing_worktree = settings.new_worktree && settings.worktree_cwd.is_none();
         if self.preparing_worktree {
             settings.worktree_base = settings.worktree_base.or(self.branch.clone());
-            self.status = "Creating worktree…".into();
+            self.status = SessionStatus::Connecting(Preparing::CreatingWorktree);
         }
         if settings.mono.is_none()
             && settings
@@ -1287,74 +1296,12 @@ impl Conversation {
                             this.questions.retain(|(card, _)| card.read(cx).id() != id);
                         }
                         for request in update.questions.into_iter().filter(|_| !stopping) {
-                            let card =
-                                cx.new(|cx| crate::questions::QuestionCard::new(request, cx));
-                            let events = cx.subscribe(
-                                &card,
-                                |this, _, reply: &crate::questions::Answered, cx| {
-                                    if this
-                                        .questions
-                                        .front()
-                                        .is_none_or(|(card, _)| card.read(cx).id() != reply.id)
-                                    {
-                                        return;
-                                    }
-                                    let before = this.needs_approval();
-                                    let decision = reply
-                                        .answers
-                                        .clone()
-                                        .map_or(Decision::Deny, Decision::Answer);
-                                    if this.controls.as_ref().is_none_or(|controls| {
-                                        controls
-                                            .send(Control {
-                                                id: reply.id.clone(),
-                                                decision,
-                                            })
-                                            .is_err()
-                                    }) {
-                                        this.status =
-                                            "The provider is no longer waiting for this answer"
-                                                .into();
-                                        cx.notify();
-                                        return;
-                                    }
-                                    if let Some((card, _)) = this.questions.pop_front() {
-                                        this.question_overlay.release(card, cx);
-                                    }
-                                    this.status = if !this.approvals.is_empty() {
-                                        "Waiting for approval"
-                                    } else if !this.questions.is_empty() {
-                                        "Waiting for your answer"
-                                    } else {
-                                        "Working…"
-                                    }
-                                    .into();
-                                    if before != this.needs_approval() {
-                                        cx.emit(SessionChanged);
-                                    }
-                                    cx.notify();
-                                },
-                            );
-                            let keep_open = cx.subscribe(
-                                &card,
-                                |this, _, request: &crate::questions::KeptOpen, cx| {
-                                    if let Some(controls) = &this.controls {
-                                        let _ = controls.send(Control {
-                                            id: request.id.clone(),
-                                            decision: Decision::KeepOpen,
-                                        });
-                                    }
-                                    cx.emit(SessionChanged);
-                                    cx.notify();
-                                },
-                            );
-                            this.questions.push_back((card, vec![events, keep_open]));
-                            this.status = "Waiting for your answer".into();
+                            this.ask_question(request, cx);
                         }
                         if !finished && !this.approvals.is_empty() {
-                            this.status = "Waiting for approval".into();
+                            this.status = SessionStatus::AwaitingApproval;
                         } else if !finished && !this.questions.is_empty() {
-                            this.status = "Waiting for your answer".into();
+                            this.status = SessionStatus::AwaitingAnswer;
                         }
                         if finished {
                             if this.is_remote() {
@@ -1380,7 +1327,7 @@ impl Conversation {
                             this.follow_ups.ready = false;
                             if this.follow_ups.resuming {
                                 this.follow_ups.resuming = false;
-                                if !stopping && this.status == "Ready" {
+                                if !stopping && this.status.is_idle() {
                                     this.follow_ups.state.paused = false;
                                     for message in &mut this.follow_ups.state.messages {
                                         message.error = None;
@@ -1395,7 +1342,7 @@ impl Conversation {
                                     cx,
                                 );
                             }
-                            if this.status != "Ready" && !this.follow_ups.state.messages.is_empty()
+                            if !this.status.is_idle() && !this.follow_ups.state.messages.is_empty()
                             {
                                 this.follow_ups.state.paused = true;
                                 this.save_follow_ups(cx);
@@ -1510,7 +1457,7 @@ impl Conversation {
         self.settings = settings;
         self.attach_account(cx);
         self.loaded = true;
-        self.status = "Ready".into();
+        self.status = SessionStatus::Idle;
         self.refresh_catalog(cx);
         self.refresh_git(cx);
         if let Some(prompt) = prompt {
@@ -1645,7 +1592,7 @@ impl Conversation {
         self.summary = summary;
         self.settings = settings;
         self.context = None;
-        self.status = "Worktree deleted".into();
+        self.status = SessionStatus::notice("Worktree deleted");
         self.refresh_git(cx);
         cx.emit(SessionChanged);
         cx.notify();
@@ -1705,7 +1652,7 @@ impl Conversation {
     }
     fn prepare_worktree(&mut self, cx: &mut Context<Self>) {
         self.preparing_worktree = true;
-        self.status = "Creating worktree…".into();
+        self.status = SessionStatus::Connecting(Preparing::CreatingWorktree);
         let cwd = self.summary.cwd.clone();
         let base = self
             .settings
@@ -1734,7 +1681,7 @@ impl Conversation {
                         }
                     }
                     Err(error) => {
-                        this.status = error.clone();
+                        this.status = SessionStatus::error(error.clone());
                         if let Some(message) = this.follow_ups.state.messages.first() {
                             let id = message.id.clone();
                             this.fail_follow_up(&id, error, cx);
@@ -2003,10 +1950,7 @@ impl Conversation {
         cx.notify();
     }
     fn set_effort_choice(&mut self, effort: &str, cx: &mut Context<Self>) {
-        self.settings
-            .model_settings
-            .retain(|key, _| !is_effort_key(key));
-        self.settings.effort = (!effort.is_empty()).then(|| effort.to_owned());
+        self.set_effort(effort);
         let provider = self.summary.provider.clone();
         if cx.has_global::<crate::settings::Preferences>() {
             cx.update_global::<crate::settings::Preferences, _>(|prefs, _| {
@@ -2017,6 +1961,13 @@ impl Conversation {
                 }
             });
         }
+    }
+    /// This session's effort, without remembering it for new sessions.
+    fn set_effort(&mut self, effort: &str) {
+        self.settings
+            .model_settings
+            .retain(|key, _| !is_effort_key(key));
+        self.settings.effort = (!effort.is_empty()).then(|| effort.to_owned());
     }
     fn selected_effort(&self) -> Option<&str> {
         self.settings
@@ -2134,7 +2085,9 @@ impl Conversation {
         picked: &ModelPicked,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.editing_last_turn.pending() || self.status == "Preparing handoff…" {
+        if self.editing_last_turn.pending()
+            || self.status == SessionStatus::Connecting(Preparing::Handoff)
+        {
             return false;
         }
         let changed_model = self.summary.provider != picked.0.id() || self.model != picked.1;
@@ -2166,7 +2119,7 @@ impl Conversation {
                 Ok(())
             });
             if let Err(error) = changed {
-                self.status = error;
+                self.status = SessionStatus::error(error);
                 cx.notify();
                 return false;
             }
@@ -2637,7 +2590,7 @@ impl Conversation {
         self.approvals.clear();
         self.questions.clear();
         self.controls = None;
-        self.status = "Ready".into();
+        self.status = SessionStatus::Idle;
         self.transcript
             .update(cx, |view, cx| view.stop_streaming(cx));
         self.review
@@ -3078,7 +3031,7 @@ impl Conversation {
                         )
                     })
                     .when(
-                        self.status != "Ready"
+                        !self.status.is_idle()
                             && !self.busy
                             && !self.loading
                             && self.settings.usage_limit.is_none(),
@@ -3088,12 +3041,12 @@ impl Conversation {
                                     .id("provider-status")
                                     .debug_selector(|| "provider-status".into())
                                     .role(Role::Status)
-                                    .aria_label(self.status.clone())
+                                    .aria_label(self.status.to_string())
                                     .max_w(px(220.))
                                     .truncate()
                                     .text_size(px(11.))
                                     .text_color(content(0.45))
-                                    .child(self.status.clone()),
+                                    .child(self.status.to_string()),
                             )
                         },
                     )
@@ -3340,7 +3293,7 @@ mod composer_motion_tests {
         window
             .update(cx, |c, w, cx| {
                 c.loaded = true;
-                c.status = "Ready".into();
+                c.status = SessionStatus::Idle;
                 w.focus(&c.input.focus_handle(cx), cx);
                 c.input.update(cx, |i, cx| {
                     i.replace_text_in_range(None, "First message", w, cx)
@@ -4099,7 +4052,7 @@ mod menu_tests {
         window
             .update(visual, |c, _, cx| {
                 c.loading = false;
-                c.status = "Couldn't load".into();
+                c.status = SessionStatus::error("Couldn't load");
                 cx.notify();
             })
             .unwrap();

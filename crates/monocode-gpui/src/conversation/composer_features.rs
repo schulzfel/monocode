@@ -67,7 +67,7 @@ impl Conversation {
     }
     pub(crate) fn toggle_mode(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.is_remote() && matches!(id, "operator" | "orchestrator") {
-            self.status = "This mode is not available on remote projects.".into();
+            self.status = SessionStatus::error("This mode is not available on remote projects.");
             cx.notify();
             return;
         }
@@ -453,7 +453,7 @@ impl Conversation {
         let start = rows.iter().rposition(|row| row.role == "user").unwrap_or(0);
         let text = monocode_core::response::prose(&rows[start..]);
         (
-            self.status == "Ready",
+            self.status.is_idle(),
             monocode_core::response::limit(&format!("{}\n{}", self.status, text), 12_000),
         )
     }

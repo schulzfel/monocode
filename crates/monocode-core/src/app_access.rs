@@ -4,13 +4,17 @@ use crate::{
     agent::{AccessMode, Settings},
     catalog::{Model, ModelControl},
     provider::Kind,
-    store::Store,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+mod notes;
 #[cfg(test)]
 mod tests;
+
+pub use notes::{
+    list_notes, notes_action, notes_action_for, read_note, write_note, NoteError, NoteWrite,
+};
 
 pub fn validate_operator(action: &str, input: &Value) -> Result<(), String> {
     if !matches!(
@@ -358,105 +362,4 @@ pub fn conversation_page(blocks: &[Value], input: &Value) -> Result<Value, Strin
         let text=crate::composer::consume_command(text,"operator").unwrap_or(text);
         json!({"turnId":user["id"],"user":capped(text,max),"assistant":answers.last().map(|b|capped(b["text"].as_str().unwrap_or(""),max)),"earlierAssistantMessages":answers.len().saturating_sub(1)})
     }).collect::<Vec<_>>(),"nextBefore":if start>0 {selected.first().map(|(b,_)|b["id"].clone())}else{None}}))
-}
-
-/// Notes use their actual persisted string IDs, including desktop-created notes.
-pub fn notes_action(
-    store: &Store,
-    caller: i64,
-    request: &str,
-    action: &str,
-    input: &Value,
-    projects: &[String],
-) -> Result<Value, String> {
-    let notes = store.list_notes()?;
-    let allowed = |note: &crate::notes::Note| {
-        note.source_cwd.as_deref().is_none_or(|cwd| {
-            projects
-                .iter()
-                .any(|p| crate::files::path_key(p) == crate::files::path_key(cwd))
-        })
-    };
-    let id = input
-        .get("id")
-        .map(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .or_else(|| v.as_u64().map(|id| id.to_string()))
-                .ok_or("id must be a note ID")
-        })
-        .transpose()?;
-    if action == "notes.list" {
-        let limit = bounded(input, "limit", 30, 1, 100)?;
-        let offset = bounded(input, "offset", 0, 0, usize::MAX)?;
-        let notes: Vec<_> = notes.iter().filter(|n| allowed(n)).collect();
-        return Ok(
-            json!({"total":notes.len(),"offset":offset,"notes":notes.iter().skip(offset).take(limit).map(|n|json!({"id":n.id,"title":n.title,"preview":n.preview(),"tags":n.tags,"sourceCwd":n.source_cwd})).collect::<Vec<_>>() }),
-        );
-    }
-    let current = id
-        .as_deref()
-        .map(|id| {
-            notes
-                .iter()
-                .find(|n| {
-                    (n.id == id
-                        || n.id == format!("gpui-note-{id}")
-                        || id.parse::<u64>().is_ok_and(|number| {
-                            crate::store::desktop_session_handle(&n.id) as u64 == number
-                        }))
-                        && allowed(n)
-                })
-                .ok_or("Note not found in this project")
-        })
-        .transpose()?;
-    if action == "notes.read" {
-        return current.map(|note| json!(note)).ok_or("Provide id".into());
-    }
-    let title = optional_text(input, "title", crate::notes::MAX_TITLE)?;
-    let body = input
-        .get("body")
-        .map(|v| {
-            v.as_str()
-                .filter(|s| s.len() <= 240_000)
-                .map(|s| s.replace("\r\n", "\n").replace('\r', "\n"))
-                .ok_or("body must be text under 240000 bytes")
-        })
-        .transpose()?;
-    let tags = input
-        .get("tags")
-        .map(|v| serde_json::from_value::<Vec<String>>(v.clone()).map_err(|e| e.to_string()))
-        .transpose()?;
-    if current.is_some() && title.is_none() && body.is_none() && tags.is_none() {
-        return Err("Supply title, body or tags to update a note".into());
-    }
-    if current.is_none() && body.is_none() {
-        return Err("body is required to create a note".into());
-    }
-    let body = body.unwrap_or_else(|| current.unwrap().body.clone());
-    let id = current.map(|n| n.id.clone()).or(id).unwrap_or_else(|| {
-        format!(
-            "app-note-{caller}-{}",
-            crate::mono::files::content_hash(request)
-        )
-    });
-    let note = store.upsert_note(&crate::notes::NoteUpsert {
-        id,
-        title: title
-            .or_else(|| current.map(|n| n.title.clone()))
-            .unwrap_or_else(|| crate::notes::title(&body)),
-        body,
-        tags: tags
-            .or_else(|| current.map(|n| n.tags.clone()))
-            .unwrap_or_default(),
-        source_session_id: match current {
-            Some(note) => note.source_session_id.clone(),
-            None => Some(store.persisted_session_id(caller)?),
-        },
-        source_cwd: current
-            .map(|n| n.source_cwd.clone())
-            .unwrap_or_else(|| projects.first().cloned()),
-        finalize_slug: true,
-    })?;
-    Ok(json!(note))
 }

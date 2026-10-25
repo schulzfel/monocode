@@ -3,6 +3,7 @@
 mod accounts;
 pub(super) mod blocks;
 mod edit;
+mod extras;
 #[cfg(test)]
 mod tests;
 mod window;
@@ -1327,22 +1328,6 @@ impl Store {
             self.shared_patch(*id, &[("pinned", json!(pinned))])?;
         }
         sql(tx.commit())
-    }
-    pub(super) fn shared_settings_with_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<(i64, String)>, String> {
-        Ok(self
-            .shared
-            .as_ref()
-            .unwrap()
-            .extras
-            .borrow()
-            .iter()
-            .filter_map(|(key, value)| {
-                Some((key.strip_prefix(prefix)?.parse().ok()?, value.clone()))
-            })
-            .collect())
     }
     pub(super) fn shared_drafts(&self) -> Result<HashSet<i64>, String> {
         let mut query = sql(self.conn.prepare(&format!(

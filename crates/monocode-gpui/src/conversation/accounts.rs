@@ -23,7 +23,7 @@ impl Conversation {
         if self.busy || monocode_core::accounts::login_arguments(kind, action).is_none() {
             return None;
         }
-        let status = self.status.to_ascii_lowercase();
+        let status = self.status.to_string().to_ascii_lowercase();
         if ![
             "not signed in",
             "not authenticated",
@@ -106,7 +106,7 @@ impl Conversation {
             .settings
             .usage_limit
             .clone()
-            .or_else(|| Limit::from_error(&self.status))
+            .or_else(|| Limit::from_error(&self.status.to_string()))
         {
             if let Some(pending) = &mut self.settings.pending_provider_switch {
                 pending.skip_outgoing_recap = true;
@@ -134,7 +134,7 @@ impl Conversation {
         self.settings
             .usage_limit
             .clone()
-            .or_else(|| Limit::from_error(&self.status))
+            .or_else(|| Limit::from_error(&self.status.to_string()))
             .or_else(|| {
                 let rows = self.transcript.read(cx).source_rows();
                 let last = rows.last()?;
@@ -195,7 +195,7 @@ impl Conversation {
         {
             return;
         }
-        self.status = "Ready".into();
+        self.status = SessionStatus::Idle;
         self.save_settings(cx);
         if self.settings.mono.is_some() {
             cx.emit(UsageResumed);
@@ -211,7 +211,7 @@ impl Conversation {
         if self.busy || self.stopping || self.settings.usage_limit.take().is_none() {
             return;
         }
-        self.status = "Ready".into();
+        self.status = SessionStatus::Idle;
         self.follow_ups.state.paused = false;
         for message in &mut self.follow_ups.state.messages {
             message.error = None;
@@ -328,9 +328,9 @@ impl Conversation {
         self.save_follow_ups(cx);
         self.catalog_epoch += 1;
         self.catalog.clear();
-        self.status =
-            "This provider account is no longer signed in. Choose another account to continue."
-                .into();
+        self.status = SessionStatus::error(
+            "This provider account is no longer signed in. Choose another account to continue.",
+        );
         cx.notify();
     }
     pub(crate) fn account_authenticated(&mut self, cx: &mut Context<Self>) {
@@ -675,7 +675,7 @@ mod tests {
             .unwrap();
         let view = cx.new(|cx| Conversation::new(summary, store, cx));
         view.update(cx, |view, cx| {
-            view.status = "rate_limit".into();
+            view.status = SessionStatus::error("rate_limit");
             view.detect_usage_limit(cx);
             assert!(view.settings.usage_limit.is_some());
             assert!(view.follow_ups.state.paused);
@@ -712,7 +712,7 @@ mod tests {
                 cx.new(|cx| {
                     let mut view = Conversation::new(summary, store, cx);
                     view.loaded = true;
-                    view.status = "Claude Code reached its usage limit.".into();
+                    view.status = SessionStatus::error("Claude Code reached its usage limit.");
                     view.settings.usage_limit = Some(Limit {
                         resets_at: Some(usage::now_ms() + 3_600_000),
                         resume_at_reset: false,
@@ -817,7 +817,7 @@ mod tests {
                 root: "/fixture".into(),
                 executable: "/fixture/binary".into(),
             });
-            v.status = "Usage limit reached: Fixture subscription exhausted".into();
+            v.status = SessionStatus::error("Usage limit reached: Fixture subscription exhausted");
             v.detect_usage_limit(cx);
             assert!(v.settings.usage_limit.is_some());
             assert!(v.follow_ups.state.paused);

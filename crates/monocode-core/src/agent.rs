@@ -85,6 +85,30 @@ impl AccessMode {
         }
     }
 }
+/// External control's access modes are the app's, one for one.
+impl From<AccessMode> for monocode_control::AccessMode {
+    fn from(mode: AccessMode) -> Self {
+        match mode {
+            AccessMode::ReadOnly => Self::ReadOnly,
+            AccessMode::Supervised => Self::Supervised,
+            AccessMode::AutoAcceptEdits => Self::AutoAcceptEdits,
+            AccessMode::Auto => Self::Auto,
+            AccessMode::FullAccess => Self::FullAccess,
+        }
+    }
+}
+impl From<monocode_control::AccessMode> for AccessMode {
+    fn from(mode: monocode_control::AccessMode) -> Self {
+        use monocode_control::AccessMode as Control;
+        match mode {
+            Control::ReadOnly => Self::ReadOnly,
+            Control::Supervised => Self::Supervised,
+            Control::AutoAcceptEdits => Self::AutoAcceptEdits,
+            Control::Auto => Self::Auto,
+            Control::FullAccess => Self::FullAccess,
+        }
+    }
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -250,4 +274,16 @@ pub struct Question {
 pub struct Control {
     pub id: String,
     pub decision: Decision,
+}
+
+#[cfg(test)]
+mod access_tests {
+    #[test]
+    fn access_modes_convert_one_for_one_with_external_control() {
+        for mode in monocode_control::AccessMode::ALL {
+            let app = super::AccessMode::from(mode);
+            assert_eq!(app.id(), mode.id());
+            assert_eq!(monocode_control::AccessMode::from(app), mode);
+        }
+    }
 }

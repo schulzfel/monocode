@@ -111,7 +111,12 @@ impl Shell {
         })
         .detach();
     }
-    fn delete_project(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn delete_project(
+        &mut self,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let sessions = self.project_sessions(path);
         self.leave_project(path, window, cx);
         self.workspace.archived_projects.retain(|p| p != path);
@@ -150,7 +155,7 @@ impl Shell {
         .detach();
     }
 
-    fn project_sessions(&self, path: &str) -> Vec<i64> {
+    pub(super) fn project_sessions(&self, path: &str) -> Vec<i64> {
         self.session_summaries
             .values()
             .filter(|summary| summary.cwd == path)

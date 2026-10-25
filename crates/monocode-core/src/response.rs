@@ -86,7 +86,7 @@ pub fn edited_files(rows: &[Row]) -> Vec<String> {
     let mut files = Vec::new();
     for row in rows.iter().filter(|r| r.role == "tool") {
         if let Ok(tool) = serde_json::from_str::<ToolCall>(&row.text) {
-            let (action, path) = tool.summary();
+            let (action, path) = tool.builtin_summary().unwrap_or_default();
             if matches!(action.as_str(), "Edit" | "Write")
                 && !path.is_empty()
                 && !files.contains(&path)

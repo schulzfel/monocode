@@ -1849,8 +1849,9 @@ impl Conversation {
         }
         self.attach_account(cx);
         let Some(target) = self.btw_target(cx) else {
-            self.status =
-                "Finish a supported conversation turn before asking a side question.".into();
+            self.status = SessionStatus::error(
+                "Finish a supported conversation turn before asking a side question.",
+            );
             cx.notify();
             return false;
         };

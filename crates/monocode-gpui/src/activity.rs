@@ -126,7 +126,8 @@ pub(crate) fn summary(tools: &[ToolCall], live: bool) -> (String, &'static str) 
     let mut others = 0;
     let mut current = "think";
     for tool in tools {
-        let (action, target) = tool.summary();
+        // An MCP server's tool is never sorted with the built-in ones.
+        let (action, target) = tool.builtin_summary().unwrap_or_default();
         let kind = match action.as_str() {
             "Read" | "List" | "Search" | "Find" => "research",
             "Edit" | "Write" => "edit",

@@ -219,7 +219,10 @@ fn worktree_setup_shows_the_prompt_immediately_and_preserves_it_on_failure(
             });
             view.send(cx);
             assert!(view.busy && view.preparing_worktree);
-            assert_eq!(view.status, "Creating worktree…");
+            assert_eq!(
+                view.status,
+                SessionStatus::Connecting(Preparing::CreatingWorktree)
+            );
             assert!(view.input.read(cx).content.is_empty());
             assert!(!view.settings.plan);
             assert_eq!(

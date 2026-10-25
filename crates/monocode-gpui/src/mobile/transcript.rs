@@ -267,12 +267,7 @@ fn notice(rows: &[Row], at: usize, end: usize) -> Option<Value> {
 }
 
 fn tool_label(call: &ToolCall, cwd: &str) -> String {
-    let shown = call.presentation_in(Some(cwd));
-    let label = [shown.action, shown.target]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let label = call.presentation_in(Some(cwd)).label();
     if label.is_empty() {
         "Working".into()
     } else {
@@ -282,7 +277,7 @@ fn tool_label(call: &ToolCall, cwd: &str) -> String {
 
 /// toolCategory, by the action `activity::summary` sorts calls by.
 fn work_kind(call: &ToolCall) -> &'static str {
-    match call.summary().0.as_str() {
+    match call.builtin_summary().unwrap_or_default().0.as_str() {
         "Read" | "List" | "Search" | "Find" => "research",
         "Edit" | "Write" => "edit",
         "Run" => "run",

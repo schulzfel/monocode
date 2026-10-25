@@ -2,7 +2,7 @@
 use super::{ToolCall, ToolState};
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ToolPresentation {
     pub action: String,
     pub target: String,
@@ -16,6 +16,8 @@ pub struct ToolPresentation {
     /// Top-level `&&`/`||`/`;` steps of an opaque chained command. Empty unless
     /// the command really chains two or more steps.
     pub steps: Vec<CommandStep>,
+    /// Whose tool it is: a built-in one, or an MCP server's.
+    pub kind: super::ToolKind,
 }
 
 /// One step of a chained shell command, captioned like a standalone command.
@@ -78,12 +80,7 @@ pub(super) fn present(call: &ToolCall, fallback_cwd: Option<&str>) -> ToolPresen
                 ToolState::Cancelled => "Context compaction cancelled",
             }
             .into(),
-            target: String::new(),
-            file_path: None,
-            start_line: None,
-            command: None,
-            description: None,
-            steps: Vec::new(),
+            ..ToolPresentation::default()
         };
     }
     let mut input = serde_json::from_str::<Value>(&call.input).unwrap_or(Value::Null);
@@ -129,6 +126,9 @@ pub(super) fn present(call: &ToolCall, fallback_cwd: Option<&str>) -> ToolPresen
         .filter(|kind| kind != "other")
         .or_else(|| string(preview, &["kind"]))
         .unwrap_or_default();
+    if let Some(shown) = super::mcp::present(call, &input, &kind) {
+        return shown;
+    }
     let name = call.name.to_lowercase();
     let execute = matches!(
         name.as_str(),
@@ -163,8 +163,7 @@ pub(super) fn present(call: &ToolCall, fallback_cwd: Option<&str>) -> ToolPresen
         file_path: path.clone(),
         start_line,
         command,
-        description: None,
-        steps: Vec::new(),
+        ..ToolPresentation::default()
     };
     if execute {
         shown.description = field(&["description"]).map(|d| d.lines().next().unwrap_or("").into());

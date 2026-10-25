@@ -638,7 +638,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
                 rows = update.rows;
             }
             if update.finished {
-                assert_eq!(update.status, "Ready");
+                assert_eq!(update.status, SessionStatus::Idle);
                 break;
             }
         }
@@ -757,7 +757,10 @@ fn ambiguous_legacy_requests_block_direct_send_and_retry_before_transport() {
         );
         let result = receive(&rx);
         assert!(result.finished);
-        assert_eq!(result.status, "Recover the original request");
+        assert_eq!(
+            result.status,
+            SessionStatus::error("Recover the original request")
+        );
         assert_eq!(
             locked(&store)
                 .unwrap()

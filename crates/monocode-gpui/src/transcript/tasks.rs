@@ -580,7 +580,7 @@ fn agent_phases(run: &AgentRun) -> Vec<AgentPhase<'_>> {
         current.steps.push(step);
         if step.kind == "tool" {
             let call = step.to_tool_call();
-            let kind = match call.summary().0.as_str() {
+            let kind = match call.builtin_summary().unwrap_or_default().0.as_str() {
                 "Edit" | "Write" => 0,
                 "Run" => 1,
                 "Agent" => 2,

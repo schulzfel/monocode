@@ -296,15 +296,7 @@ fn serve(mut stream: TcpStream, hub: &Hub) -> Result<(), String> {
         let capability = sessions
             .get(&wire.session)
             .ok_or("Invalid visual capability")?;
-        let secret = &capability.token;
-        let equal = wire.token.len() == secret.len()
-            && wire
-                .token
-                .bytes()
-                .zip(secret.bytes())
-                .fold(0u8, |diff, (a, b)| diff | a ^ b)
-                == 0;
-        if !equal {
+        if !crate::token::same(&wire.token, &capability.token) {
             return Err("Invalid visual capability".into());
         }
         capability.active.as_ref().map(|active| active.generation)
@@ -623,45 +615,32 @@ pub fn configured(environment: &HashMap<String, String>) -> bool {
         .all(|key| environment.contains_key(*key))
 }
 
-/// Provider-specific adapters use this ephemeral stdio server definition.
-pub fn mcp_server(environment: &HashMap<String, String>) -> Option<Value> {
-    configured(environment).then(|| {
-        json!({
-            "type":"stdio", "command":environment[ENV_EXECUTABLE], "args":["visual-mcp"]
-        })
+/// The visual server's name, as providers and transcripts see it.
+pub(crate) const SERVER: &str = "monocode_visual";
+/// Each visual tool's title, published with its definition and shown in
+/// transcripts.
+const TITLES: [(&str, &str); 3] = [
+    ("visual_docs", "Read visual docs"),
+    ("visual_check", "Check visual"),
+    ("visual_show", "Show visual"),
+];
+
+/// The title of the visual tool called `name`.
+pub(crate) fn tool_title(name: &str) -> Option<&'static str> {
+    TITLES
+        .iter()
+        .find(|(tool, _)| *tool == name)
+        .map(|(_, title)| *title)
+}
+
+/// This session's visual server, which `app_mcp` renders per provider.
+pub(crate) fn app_server(environment: &HashMap<String, String>) -> Option<crate::app_mcp::Server> {
+    configured(environment).then(|| crate::app_mcp::Server {
+        name: SERVER,
+        command: environment[ENV_EXECUTABLE].clone(),
+        args: vec!["visual-mcp".into()],
+        env: &[ENV_ENDPOINT, ENV_TOKEN, ENV_SESSION, ENV_EXECUTABLE],
     })
-}
-
-pub fn acp_servers(environment: &HashMap<String, String>) -> Value {
-    let Some(mut server) = mcp_server(environment) else {
-        return json!([]);
-    };
-    // ACP's stdio server shape omits the transport discriminator.
-    server.as_object_mut().unwrap().remove("type");
-    server["name"] = "monocode_visual".into();
-    server["env"] = [ENV_ENDPOINT, ENV_TOKEN, ENV_SESSION, ENV_EXECUTABLE]
-        .into_iter()
-        .map(|key| json!({"name":key,"value":environment[key]}))
-        .collect::<Vec<_>>()
-        .into();
-    json!([server])
-}
-
-pub fn configure_codex(command: &mut std::process::Command, environment: &HashMap<String, String>) {
-    if !configured(environment) {
-        return;
-    }
-    for (key, value) in [
-        ("command", json!(environment[ENV_EXECUTABLE])),
-        ("args", json!(["visual-mcp"])),
-        (
-            "env_vars",
-            json!([ENV_ENDPOINT, ENV_TOKEN, ENV_SESSION, ENV_EXECUTABLE]),
-        ),
-    ] {
-        // JSON's strings and arrays are valid TOML literals for these values.
-        command.args(["-c", &format!("mcp_servers.monocode_visual.{key}={value}")]);
-    }
 }
 
 pub fn tool_definitions() -> Vec<Value> {
@@ -670,10 +649,11 @@ pub fn tool_definitions() -> Vec<Value> {
     show_properties["title"] = json!({"type":"string","maxLength":160});
     show_properties["id"] = json!({"type":"string","maxLength":96,"description":"Optional document identifier. A new request appends a new visual; reuse requestId to retry a publication."});
     show_properties["requestId"] = json!({"type":"string","maxLength":128,"description":"Reuse when retrying an uncertain publication"});
+    let [docs, check, show] = TITLES.map(|(_, title)| title);
     vec![
-        json!({"name":"visual_docs","description":"Read the native visual SDK reference, examples and styling rules when preparing an inline visual. Does not publish.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}),
-        json!({"name":"visual_check","description":"Validate a native visual program and representative controls without publishing. Returns its component tree. Read visual_docs for the SDK reference.","inputSchema":{"type":"object","properties":properties,"required":["source"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}),
-        json!({"name":"visual_show","description":"Publish an interactive native visual into the current conversation and save it with the transcript. Read visual_docs for the SDK reference; validate with visual_check before publishing.","inputSchema":{"type":"object","properties":show_properties,"required":["source"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}),
+        json!({"name":"visual_docs","title":docs,"description":"Read the native visual SDK reference, examples and styling rules when preparing an inline visual. Does not publish.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}),
+        json!({"name":"visual_check","title":check,"description":"Validate a native visual program and representative controls without publishing. Returns its component tree. Read visual_docs for the SDK reference.","inputSchema":{"type":"object","properties":properties,"required":["source"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}),
+        json!({"name":"visual_show","title":show,"description":"Publish an interactive native visual into the current conversation and save it with the transcript. Read visual_docs for the SDK reference; validate with visual_check before publishing.","inputSchema":{"type":"object","properties":show_properties,"required":["source"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}),
     ]
 }
 
@@ -681,7 +661,7 @@ fn mcp_response(request: Value, environment: &HashMap<String, String>) -> Option
     let id = request.get("id")?.clone();
     let result = match request["method"].as_str().unwrap_or("") {
         "initialize" => Ok(
-            json!({"protocolVersion":request["params"]["protocolVersion"].as_str().unwrap_or("2024-11-05"),"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"monocode_visual","version":env!("CARGO_PKG_VERSION")}}),
+            json!({"protocolVersion":request["params"]["protocolVersion"].as_str().unwrap_or("2024-11-05"),"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":SERVER,"version":env!("CARGO_PKG_VERSION")}}),
         ),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools":tool_definitions()})),
@@ -816,7 +796,7 @@ mod tests {
         let response = mcp_response(json!({"id":2,"method":"tools/call","params":{"name":"visual_show","arguments":input()}}), &environment).unwrap();
         assert_eq!(response["result"]["isError"], true);
         assert_eq!(tool_definitions().len(), 3);
-        assert_eq!(acp_servers(&environment), json!([]));
+        assert_eq!(crate::app_mcp::acp_servers(&environment), json!([]));
     }
 
     #[test]
@@ -885,7 +865,7 @@ mod tests {
         let server = Server::start(84).unwrap();
         let environment = server.environment(std::path::Path::new("/test/app"));
         let mut command = std::process::Command::new("provider");
-        configure_codex(&mut command, &environment);
+        crate::app_mcp::configure_codex(&mut command, &environment);
         let arguments = command
             .get_args()
             .map(|arg| arg.to_string_lossy())
@@ -894,9 +874,9 @@ mod tests {
         assert!(arguments.contains("visual-mcp"));
         assert!(arguments.contains(ENV_TOKEN));
         assert!(!arguments.contains(&environment[ENV_TOKEN]));
-        let acp = acp_servers(&environment);
+        let acp = crate::app_mcp::acp_servers(&environment);
         assert_eq!(acp[0]["name"], "monocode_visual");
         assert_eq!(acp[0]["env"].as_array().unwrap().len(), 4);
-        assert_eq!(mcp_server(&environment).unwrap()["command"], "/test/app");
+        assert_eq!(app_server(&environment).unwrap().command, "/test/app");
     }
 }

@@ -125,7 +125,7 @@ impl Section {
     }
     fn keywords(self) -> &'static str {
         match self {
-            Section::General => "version update sounds notifications notes rail",
+            Section::General => "version update sounds notifications notes rail mcp server clients",
             Section::Connections => "ssh remote host machine server environment always on",
             Section::Appearance => {
                 "theme dark light color accent glass blur zoom scale wallpaper rail sidebar"

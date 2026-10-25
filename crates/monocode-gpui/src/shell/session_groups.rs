@@ -806,6 +806,42 @@ impl Shell {
             });
         }));
     }
+    /// A task that ends once every sidebar write queued so far is stored.
+    pub(super) fn after_group_writes(&mut self, cx: &mut Context<Self>) -> gpui::Task<()> {
+        let previous = self.group_writes.take();
+        let (done, finished) = async_channel::bounded::<()>(1);
+        self.group_writes = Some(cx.spawn(async move |_, _| {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            let _ = done.try_send(());
+        }));
+        cx.background_executor().spawn(async move {
+            let _ = finished.recv().await;
+        })
+    }
+    /// Deletes session `id` as the sidebar's Delete does, for a caller
+    /// that answers once it is done (Operator, external control). Refused
+    /// at once with the window's reason, if it gave one; otherwise the task
+    /// ends once the deletion is stored, with whether the store no longer
+    /// has the session.
+    pub(super) fn delete_session_checked(
+        &mut self,
+        id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<gpui::Task<Result<bool, String>>, Option<String>> {
+        self.delete_session(id, window, cx);
+        if !self.deleting.contains(&id) {
+            return Err(self.error.clone());
+        }
+        let written = self.after_group_writes(cx);
+        let store = self.store.clone();
+        Ok(cx.background_executor().spawn(async move {
+            written.await;
+            Ok(!locked(&store)?.sessions()?.iter().any(|s| s.id == id))
+        }))
+    }
     fn forget_session(&mut self, id: i64, cx: &mut Context<Self>) {
         // A tab opened on it while the store was deleting keeps it alive.
         if self.workspace.tab_of(id).is_some() {

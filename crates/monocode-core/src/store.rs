@@ -4,6 +4,7 @@ mod managed_sessions;
 mod monocode_import;
 mod monos;
 mod notes;
+mod prefixed;
 mod remote;
 mod remote_legacy;
 pub use remote::{RemoteProject, RemoteSession, RemoteUpload};
@@ -494,27 +495,11 @@ impl Store {
     }
     /// `prefix<session id>` settings, by session id.
     fn settings_with_prefix(&self, prefix: &str) -> Result<Vec<(i64, String)>, String> {
-        if self.shared.is_some() {
-            return self.shared_settings_with_prefix(prefix);
-        }
-
-        let mut stmt = self
-            .conn
-            .prepare("SELECT key, value FROM native_settings WHERE key LIKE ?1 || '%'")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([prefix], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (key, value) = row.map_err(|e| e.to_string())?;
-            if let Some(id) = key.strip_prefix(prefix).and_then(|id| id.parse().ok()) {
-                out.push((id, value));
-            }
-        }
-        Ok(out)
+        Ok(self
+            .settings_under(prefix)?
+            .into_iter()
+            .filter_map(|(key, value)| Some((key.strip_prefix(prefix)?.parse().ok()?, value)))
+            .collect())
     }
     /// Sessions whose latest message is saved as a draft and not yet sent.
     pub fn draft_sessions(&self) -> Result<std::collections::HashSet<i64>, String> {
@@ -1038,7 +1023,7 @@ impl Store {
         tx.execute("DELETE FROM native_reminders WHERE session_id=?1", [id])
             .map_err(|e| e.to_string())?;
         tx.execute(
-            "DELETE FROM native_settings WHERE key IN (?1,?2,?3,?5,?6,?7,?8) OR key LIKE ?4",
+            "DELETE FROM native_settings WHERE key IN (?1,?2,?3,?5,?6,?7,?8,?9) OR key LIKE ?4",
             params![
                 format!("agent:{id}"),
                 format!("context:{id}"),
@@ -1047,7 +1032,8 @@ impl Store {
                 format!("started-by:{id}"),
                 format!("orchestration:{id}"),
                 format!("inbox-ask:{id}"),
-                format!("automation:{id}")
+                format!("automation:{id}"),
+                format!("started-by-client:{id}")
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1283,6 +1269,7 @@ mod tests {
         let lead = store.create("codex", "/p").unwrap().id;
         let child = store.create("codex", "/p").unwrap().id;
         store.save_started_link(child, lead).unwrap();
+        store.save_started_client(lead, "mcp:Claude Code").unwrap();
         let summary = crate::orchestration::Summary {
             tasks: vec![crate::orchestration::SummaryTask {
                 session: Some(child),
@@ -1297,11 +1284,18 @@ mod tests {
         drop(store);
         let mut store = Store::open(&path).unwrap();
         assert_eq!(store.started_links().unwrap()[&child], lead);
+        assert_eq!(
+            store.started_links().unwrap().len(),
+            1,
+            "a client origin is not a caller session"
+        );
+        assert_eq!(store.started_clients().unwrap()[&lead], "mcp:Claude Code");
         assert_eq!(store.orchestration_summaries().unwrap()[&lead], summary);
         assert_eq!(summary.tasks[0].label(&summary, false), "Working");
         store.delete(child).unwrap();
         store.delete(lead).unwrap();
         assert!(store.started_links().unwrap().is_empty());
+        assert!(store.started_clients().unwrap().is_empty());
         assert!(store.orchestration_summaries().unwrap().is_empty());
     }
     #[test]

@@ -23,6 +23,38 @@ impl Shell {
     pub(super) fn project_mark(&self, path: &str, side: f32) -> AnyElement {
         project_icon(&self.appearance(path), path, side)
     }
+    /// Changes how `path` looks in the rail and its chats, then saves it.
+    pub(super) fn set_project_appearance(
+        &mut self,
+        path: &str,
+        change: impl FnOnce(&mut ProjectAppearance),
+        cx: &mut Context<Self>,
+    ) {
+        let mut appearance = self.appearance(path);
+        change(&mut appearance);
+        self.save_project_appearance(path.to_owned(), appearance, cx);
+    }
+    /// Puts the projects named in `order` into the rail slots they already
+    /// hold among themselves, in that order; the others keep their places.
+    pub(super) fn apply_project_order(&mut self, order: Vec<String>) {
+        let subset: HashSet<String> = order.iter().cloned().collect();
+        let mut order = order.into_iter();
+        for path in &mut self.workspace.projects {
+            if subset.contains(path.as_str())
+                && let Some(id) = order.next()
+            {
+                *path = id;
+            }
+        }
+    }
+    /// Reorders the rail and saves it.
+    pub(super) fn reorder_projects(&mut self, order: Vec<String>, cx: &mut Context<Self>) {
+        self.apply_project_order(order);
+        self.persist(cx);
+        self.invalidate_chrome(cx);
+        self.projects_frame.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
     fn save_project_appearance(
         &mut self,
         path: String,
@@ -57,7 +89,7 @@ impl Shell {
             window,
             move |this, _, event: &Event, window, cx| match event {
                 Event::Changed(appearance) => {
-                    this.save_project_appearance(path.clone(), appearance.clone(), cx)
+                    this.set_project_appearance(&path, |a| *a = appearance.clone(), cx)
                 }
                 Event::Close => {
                     this.close_menu(cx);

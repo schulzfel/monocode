@@ -7,6 +7,8 @@ mod general;
 mod inbox;
 mod keybindings;
 mod mcp;
+mod mcp_clients;
+mod mcp_server;
 mod mobile;
 mod monos;
 mod providers;
@@ -16,6 +18,9 @@ mod worktrees;
 pub(super) use appearance::parse_hex;
 pub(super) use connections::ConnectionsState;
 pub(crate) use keybindings::command_shortcut;
+#[cfg(test)]
+pub(super) use mcp_clients::since as mcp_since;
+pub(super) use mcp_server::McpServerState;
 pub(super) use mobile::MobileState;
 
 use super::{Section, SettingsView};

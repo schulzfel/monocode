@@ -9,6 +9,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
+mod app_control;
 #[cfg(all(test, unix))]
 mod follow_up_tests;
 mod handoff;
@@ -17,6 +18,7 @@ pub(crate) mod remote;
 mod visual_discovery;
 #[cfg(all(test, unix))]
 mod visual_tests;
+use crate::conversation::{Preparing, SessionStatus};
 use persistence::PendingSave;
 pub(crate) type Database = Arc<Mutex<Store>>;
 struct TurnInput {
@@ -48,7 +50,7 @@ pub(crate) struct Update {
     pub(crate) questions: Vec<monocode_core::agent::Question>,
     pub(crate) questions_resolved: Vec<String>,
     pub(crate) handoff: Option<Option<monocode_core::agent::Handoff>>,
-    pub(crate) status: String,
+    pub(crate) status: SessionStatus,
     pub(crate) finished: bool,
 }
 fn publish(
@@ -248,14 +250,13 @@ fn run_turn_using(
                 questions: Vec::new(),
                 questions_resolved: Vec::new(),
                 handoff: None,
-                status: if creating_worktree {
-                    "Creating worktree…"
+                status: SessionStatus::Connecting(if creating_worktree {
+                    Preparing::CreatingWorktree
                 } else if settings.pending_provider_switch.is_some() {
-                    "Preparing handoff…"
+                    Preparing::Handoff
                 } else {
-                    "Connecting…"
-                }
-                .into(),
+                    Preparing::Connecting
+                }),
                 finished: false,
             },
         )?;
@@ -302,7 +303,7 @@ fn run_turn_using(
                     questions: Vec::new(),
                     questions_resolved: Vec::new(),
                     handoff: None,
-                    status: "Connecting…".into(),
+                    status: SessionStatus::Connecting(Preparing::Connecting),
                     finished: false,
                 },
             )?;
@@ -355,7 +356,7 @@ fn run_turn_using(
                     questions: Vec::new(),
                     questions_resolved: Vec::new(),
                     handoff: Some(Some(prepared)),
-                    status: "Connecting…".into(),
+                    status: SessionStatus::Connecting(Preparing::Connecting),
                     finished: false,
                 },
             )?;
@@ -474,10 +475,14 @@ fn run_turn_using(
                 shlex_quote(&cli.to_string_lossy())
             );
         }
-        // Every foreground session receives an independent visual capability.
+        // Every foreground session receives an independent visual capability,
+        // and MonoCode's own MCP server (`app_control`).
         // This happens after configuration was persisted, and Settings' env is
         // transport-only, so credentials never enter saved conversation settings.
         let visual_bridge = if !settings.text_only && !raw_native_command {
+            let control =
+                app_control::environment(&*locked(&store)?, summary.id, kind, &summary.cwd);
+            settings.environment.extend(control);
             Some(monocode_core::visual_bridge::Server::start(summary.id)?)
         } else {
             None
@@ -529,7 +534,7 @@ fn run_turn_using(
                     return Ok(());
                 }
                 let mut start = transcript.rows.len();
-                let mut status = "Streaming…".to_string();
+                let mut status = SessionStatus::working("Streaming…");
                 let mut changed_id = None;
                 let mut model = None;
                 let mut config_model = None;
@@ -643,11 +648,10 @@ fn run_turn_using(
                         Event::Tool(tool) => {
                             if tool.is_compaction() {
                                 status = if tool.state == monocode_core::tool::ToolState::Running {
-                                    "Compacting context…"
+                                    SessionStatus::working("Compacting context…")
                                 } else {
-                                    "Working…"
-                                }
-                                .into();
+                                    SessionStatus::Working(None)
+                                };
                             }
                             let ix = *tool_rows
                                 .entry(tool.id.clone())
@@ -744,7 +748,7 @@ fn run_turn_using(
                             pending.context_changed();
                         }
                         Event::Approval(approval) => {
-                            status = "Waiting for approval".into();
+                            status = SessionStatus::AwaitingApproval;
                             approvals.push(approval);
                             boundary = true;
                         }
@@ -753,7 +757,7 @@ fn run_turn_using(
                             boundary = true;
                         }
                         Event::Question(question) => {
-                            status = "Waiting for your answer".into();
+                            status = SessionStatus::AwaitingAnswer;
                             questions.push(question);
                             boundary = true;
                         }
@@ -761,11 +765,11 @@ fn run_turn_using(
                             questions_resolved.push(id);
                             boundary = true;
                         }
-                        Event::Status(text) => status = text,
+                        Event::Status(text) => status = SessionStatus::working(text),
                         Event::Background(tasks) => background = Some(tasks),
                         Event::UsageLimited(limit) => usage_limit = Some(limit),
                         Event::Done => {
-                            status = "Ready".into();
+                            status = SessionStatus::Idle;
                             boundary = true;
                         }
                     }
@@ -919,11 +923,13 @@ fn run_turn_using(
             0,
             Vec::new(),
             if cancelled {
-                "Ready".into()
+                SessionStatus::Idle
             } else {
-                result
-                    .err()
-                    .unwrap_or_else(|| "Conversation was not loaded".into())
+                SessionStatus::error(
+                    result
+                        .err()
+                        .unwrap_or_else(|| "Conversation was not loaded".into()),
+                )
             },
         )
     } else if let Err(error) = result
@@ -942,7 +948,11 @@ fn run_turn_using(
             Ok(()) => error,
             Err(storage) => format!("{error} · Saving failed: {storage}"),
         };
-        (start, transcript.rows[start..].to_vec(), error)
+        (
+            start,
+            transcript.rows[start..].to_vec(),
+            SessionStatus::error(error),
+        )
     } else {
         if final_start < transcript.rows.len() {
             pending.changed(final_start);
@@ -955,8 +965,10 @@ fn run_turn_using(
                 &context,
                 std::time::Instant::now(),
             )
-            .map(|_| "Ready".into())
-            .unwrap_or_else(|error| format!("Saving failed: {error}"));
+            .map_or_else(
+                |error| SessionStatus::error(format!("Saving failed: {error}")),
+                |_| SessionStatus::Idle,
+            );
         (final_start, transcript.rows[final_start..].to_vec(), status)
     };
     // Settle provenance in storage before notifying the view, including when
@@ -967,11 +979,11 @@ fn run_turn_using(
         info.duration_known = true;
         info.completed_at = info.started_at.map(|_| completed);
         if let Err(error) = persistence::save_turn_receipt(&store, summary.id, turn, info) {
-            status = format!("{status} · Saving turn metadata failed: {error}");
+            status = status.with_failure(&format!("Saving turn metadata failed: {error}"));
         }
     }
     if let Err(error) = handoff_save {
-        status = format!("{status} · Saving handoff failed: {error}");
+        status = status.with_failure(&format!("Saving handoff failed: {error}"));
     }
     // Final status must still arrive after cancellation. Dropping a window closes
     // the receiver, so the worker never keeps a closed viewport alive.
@@ -1017,8 +1029,8 @@ pub(crate) fn edited_paths(rows: &[Row]) -> Vec<String> {
         }
         let shown = tool.presentation();
         if matches!(
-            shown.action.as_str(),
-            "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
+            shown.builtin_action(),
+            Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit")
         ) {
             let input = serde_json::from_str::<serde_json::Value>(&tool.input).unwrap_or_default();
             let many = input["paths"]

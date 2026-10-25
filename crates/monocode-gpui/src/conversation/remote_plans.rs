@@ -150,14 +150,16 @@ impl Conversation {
             || self.busy
             || self.stopping
         {
-            self.status =
-                "Reconnect and wait for the remote turn to finish before building this plan."
-                    .into();
+            self.status = SessionStatus::error(
+                "Reconnect and wait for the remote turn to finish before building this plan.",
+            );
             cx.notify();
             return;
         }
         if !self.remote_state.capabilities.contains("sessions.plan") {
-            self.status = "Update MonoCode Host in Connections settings to build plans.".into();
+            self.status = SessionStatus::error(
+                "Update MonoCode Host in Connections settings to build plans.",
+            );
             cx.notify();
             return;
         }

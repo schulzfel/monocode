@@ -19,26 +19,29 @@ impl Conversation {
         attachments: Vec<std::path::PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        self.submit_external(prompt, attachments, None, cx);
+    }
+
+    /// A message from outside the composer (a phone, a control client): it
+    /// starts a turn, or while one runs it queues, steering when `steer`
+    /// says so (the follow-up preference decides when `None`).
+    pub(crate) fn submit_external(
+        &mut self,
+        prompt: String,
+        attachments: Vec<std::path::PathBuf>,
+        steer: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.history_ready() {
             self.defer_history_action(
-                move |this, cx| this.mobile_submit(prompt, attachments, cx),
+                move |this, cx| this.submit_external(prompt, attachments, steer, cx),
                 cx,
             );
             return;
         }
-        let composer_busy = self.attaching
-            || !self.input.read(cx).content.is_empty()
-            || !self.attachments.is_empty();
-        if self.busy
-            || self.stopping
-            || self.preparing_worktree
-            || composer_busy
-            || self.editing_last_turn.pending()
-            || self.settings.pending_provider_switch.is_some()
-            || (!self.follow_ups.state.messages.is_empty() && !self.follow_ups.state.paused)
-        {
+        if self.external_queues(cx) {
             let composer = std::mem::replace(&mut self.attachments, attachments);
-            self.enqueue_follow_up(prompt, None, cx);
+            self.enqueue_steered(prompt, None, steer, cx);
             self.attachments = composer;
             if !self.busy {
                 self.pump_follow_ups(cx);
@@ -51,6 +54,22 @@ impl Conversation {
         self.input.update(cx, |i, cx| i.set_text(prompt, cx));
         self.send(cx);
         cx.emit(SessionChanged);
+    }
+
+    /// Whether a message from outside the composer waits in the queue rather
+    /// than starting a turn: a turn runs or is being prepared, the person is
+    /// composing, or earlier queued messages go first.
+    pub(crate) fn external_queues(&self, cx: &gpui::App) -> bool {
+        let composer_busy = self.attaching
+            || !self.input.read(cx).content.is_empty()
+            || !self.attachments.is_empty();
+        self.busy
+            || self.stopping
+            || self.preparing_worktree
+            || composer_busy
+            || self.editing_last_turn.pending()
+            || self.settings.pending_provider_switch.is_some()
+            || (!self.follow_ups.state.messages.is_empty() && !self.follow_ups.state.paused)
     }
 
     /// The phone's model and access sheets. A provider switch is armed as the

@@ -119,7 +119,7 @@ for line in sys.stdin:
         }
     };
     worker.join().unwrap();
-    assert_eq!(final_status, "Ready");
+    assert_eq!(final_status, SessionStatus::Idle);
     assert!(live_visual, "The visual must arrive before the turn ends");
     let acknowledgment: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture.0.join("acknowledged.json")).unwrap())

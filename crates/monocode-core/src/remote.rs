@@ -97,6 +97,11 @@ pub fn default_connections() -> Result<Arc<Connections>, String> {
 
 pub const REMOTE_PATH_PREFIX: &str = "remote://";
 
+/// Whether `path` names a project or file on another machine.
+pub fn is_remote_path(path: &str) -> bool {
+    path.starts_with(REMOTE_PATH_PREFIX)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemotePath {
     pub environment_id: String,

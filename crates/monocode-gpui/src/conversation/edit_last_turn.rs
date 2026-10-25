@@ -28,7 +28,7 @@ impl Conversation {
         if self.editing_last_turn.prepared.take().is_none() {
             return false;
         }
-        self.status = "Ready".into();
+        self.status = SessionStatus::Idle;
         self.run_history_actions(cx);
         cx.notify();
         true
@@ -51,7 +51,7 @@ impl Conversation {
                 this.install_transfer(settings, None, cx);
             }
         }));
-        self.status = "Finish or cancel the current message edit to continue".into();
+        self.status = SessionStatus::error("Finish or cancel the current message edit to continue");
         cx.notify();
     }
     fn can_prepare_edit(&self, cx: &gpui::App) -> bool {
@@ -87,7 +87,9 @@ impl Conversation {
         cx: &mut Context<Self>,
     ) {
         if self.is_remote() {
-            self.status = "Editing the last message is not supported by this remote host.".into();
+            self.status = SessionStatus::error(
+                "Editing the last message is not supported by this remote host.",
+            );
             cx.notify();
             return;
         }
@@ -107,7 +109,7 @@ impl Conversation {
             .max_by_key(|(row, _)| **row)
             .and_then(|(_, info)| info.provider_turn_id.clone());
         self.editing_last_turn.active = true;
-        self.status = "Preparing edit…".into();
+        self.status = SessionStatus::working("Preparing edit…");
         self.response_menu = None;
         let store = self.store.clone();
         let id = self.summary.id;
@@ -133,12 +135,19 @@ impl Conversation {
                             .update(cx, |input, cx| input.set_text(edit.prompt.clone(), cx));
                         this.attachments = edit.attachments.clone();
                         this.editing_last_turn.prepared = Some(edit);
-                        this.status = "Editing last message — send to replace its turn".into();
+                        this.status = SessionStatus::notice(
+                            "Editing last message — send to replace its turn",
+                        );
                     }
                     Ok(_) => {
-                        this.status = "Composer or conversation changed; edit cancelled".into()
+                        this.status = SessionStatus::notice(
+                            "Composer or conversation changed; edit cancelled",
+                        )
                     }
-                    Err(error) => this.status = format!("Could not edit last message: {error}"),
+                    Err(error) => {
+                        this.status =
+                            SessionStatus::error(format!("Could not edit last message: {error}"))
+                    }
                 }
                 if !this.editing_last_turn.pending() {
                     this.run_history_actions(cx);
@@ -162,14 +171,14 @@ impl Conversation {
         match recovery {
             Ok(Some(reason)) => {
                 self.editing_last_turn.blocked = true;
-                self.status = reason;
+                self.status = SessionStatus::error(reason);
                 cx.notify();
                 return true;
             }
             Err(error) => {
-                self.status = format!(
+                self.status = SessionStatus::error(format!(
                     "Could not verify conversation history: {error}. Your draft is preserved."
-                );
+                ));
                 cx.notify();
                 return true;
             }
@@ -182,7 +191,7 @@ impl Conversation {
             // Clearing the recalled prompt cancels the edit without touching
             // either provider or history. The next new prompt sends normally.
             self.editing_last_turn.prepared = None;
-            self.status = "Ready".into();
+            self.status = SessionStatus::Idle;
             self.run_history_actions(cx);
             cx.notify();
             return true;
@@ -195,7 +204,8 @@ impl Conversation {
                 .any(|command| monocode_core::composer::consume_command(text, command).is_some())
             || self.draft_active(cx)
         {
-            self.status = "Cancel message editing before running a local command".into();
+            self.status =
+                SessionStatus::error("Cancel message editing before running a local command");
             cx.notify();
             return true;
         }
@@ -220,16 +230,17 @@ impl Conversation {
             || self.settings.account.id != edit.account_id
             || self.execution_cwd() != edit.cwd
         {
-            self.status = "Conversation changed; cancel the edit before sending".into();
+            self.status =
+                SessionStatus::error("Conversation changed; cancel the edit before sending");
             cx.notify();
             return true;
         }
         let kind = Kind::from_id(&self.summary.provider);
         let Some(binary) = provider::resolve(kind) else {
-            self.status = format!(
+            self.status = SessionStatus::error(format!(
                 "{} executable was not found; edited prompt preserved",
                 kind.label()
-            );
+            ));
             cx.notify();
             return true;
         };
@@ -252,7 +263,7 @@ impl Conversation {
         // Keep the visible draft in place until confirmation, including on a
         // rejected RPC. IME composition was checked before making it read-only.
         self.input.update(cx, |input, _| input.set_read_only(true));
-        self.status = "Rewinding last turn…".into();
+        self.status = SessionStatus::working("Rewinding last turn…");
         let store = self.store.clone();
         let id = self.summary.id;
         let work = cx.background_executor().spawn(async move {
@@ -304,9 +315,9 @@ impl Conversation {
                         if error.starts_with("Provider recovery required:") {
                             this.editing_last_turn.blocked = true;
                             this.editing_last_turn.prepared = None;
-                            this.status = format!("{error}. Start a new conversation; your edited draft is preserved here.");
+                            this.status = SessionStatus::error(format!("{error}. Start a new conversation; your edited draft is preserved here."));
                         } else {
-                            this.status = format!("Could not rewind last turn: {error}. Your edited prompt is preserved.");
+                            this.status = SessionStatus::error(format!("Could not rewind last turn: {error}. Your edited prompt is preserved."));
                         }
                     }
                 }
@@ -341,7 +352,9 @@ impl Conversation {
             self.follow_ups.state.messages.push(message);
         }
         self.save_follow_ups(cx);
-        self.status = "Last turn rewound; the edited prompt was saved as a draft because the composer changed".into();
+        self.status = SessionStatus::notice(
+            "Last turn rewound; the edited prompt was saved as a draft because the composer changed",
+        );
     }
 }
 

@@ -15,6 +15,7 @@ mod composer_motion;
 mod composer_runner;
 mod context_meter;
 mod conversation;
+mod data_location;
 #[cfg(debug_assertions)]
 mod dev_reload;
 mod diff_view;
@@ -38,6 +39,7 @@ mod inbox;
 mod input;
 mod markdown;
 mod markdown_model;
+mod mcp_command;
 #[cfg(target_os = "macos")]
 mod memory_log;
 #[cfg(all(test, target_os = "macos"))]
@@ -179,6 +181,9 @@ fn main() {
         println!("Monocode Native {}", notifications::updater::version());
         return;
     }
+    if cli_args.first().is_some_and(|a| a == "mcp") {
+        std::process::exit(mcp_command::run(&cli_args[1..]));
+    }
     if cli_args.first().is_some_and(|a| a == "visual-mcp") {
         if let Err(error) = monocode_core::visual_bridge::mcp_stdio() {
             eprintln!("{error}");
@@ -221,8 +226,7 @@ fn main() {
     let mut chat_fixture = false;
     let mut visual_fixture = false;
     // Development stays separate; release builds use the installed app's data.
-    let mut use_monocode = bundle_uses_monocode_data().unwrap_or(!cfg!(debug_assertions));
-    let mut monocode_db = monocode_core::store::monocode_database();
+    let mut location = data_location::DataLocation::new();
     let mut check_data = false;
     let mut explicit_cwd = false;
     let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -231,12 +235,6 @@ fn main() {
             "--fixture" => fixture = true,
             "--chat-fixture" => chat_fixture = true,
             "--visual-fixture" => visual_fixture = true,
-            "--dev-data" => use_monocode = false,
-            "--monocode-data" => use_monocode = true,
-            "--monocode-db" => {
-                use_monocode = true;
-                monocode_db = PathBuf::from(args.next().expect("--monocode-db needs a path"));
-            }
             "--check-data" => check_data = true,
             "--cwd" => {
                 explicit_cwd = true;
@@ -244,16 +242,19 @@ fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "monocode-gpui [--cwd PATH] [--dev-data | --monocode-data | --monocode-db PATH]\nDevelopment builds use a separate database; release builds use the installed MonoCode database.\n--dev-data opens an isolated development database using Monocode's existing schema.\n--monocode-data opens the existing desktop monocode.db directly.\n--monocode-db PATH opens a specific desktop database.\n--fixture, --chat-fixture and --visual-fixture add local samples to isolated development data only.\nvisual docs prints the native visual SDK reference.\nvisual check/show --input FILE validates or publishes native session visuals.\nvisual-mcp runs the session visual tool server over standard input/output.\n--check-data validates and lists the selected store read-only, then exits."
+                    "monocode-gpui [--cwd PATH] [--dev-data | --monocode-data | --monocode-db PATH]\nDevelopment builds use a separate database; release builds use the installed MonoCode database.\n--dev-data opens an isolated development database using Monocode's existing schema.\n--monocode-data opens the existing desktop monocode.db directly.\n--monocode-db PATH opens a specific desktop database.\n--fixture, --chat-fixture and --visual-fixture add local samples to isolated development data only.\nvisual docs prints the native visual SDK reference.\nvisual check/show --input FILE validates or publishes native session visuals.\nvisual-mcp runs the session visual tool server over standard input/output.\nmcp runs MonoCode's MCP server over standard input/output for external clients (see mcp --help).\n--check-data validates and lists the selected store read-only, then exits."
                 );
                 return;
             }
+            flag if location.apply(flag, &mut args) => {}
             _ => {
                 eprintln!("Unknown option: {arg}");
                 std::process::exit(2);
             }
         }
     }
+    let use_monocode = location.monocode();
+    data_location::record(&location);
     if use_monocode && (fixture || chat_fixture || visual_fixture) {
         eprintln!(
             "Fixtures require --dev-data; they cannot be written into your Monocode database."
@@ -265,11 +266,7 @@ fn main() {
         .unwrap_or(cwd)
         .to_string_lossy()
         .to_string();
-    let database = if use_monocode {
-        monocode_db
-    } else {
-        data_dir().join("monocode.db")
-    };
+    let database = location.database();
     if !use_monocode
         && database
             .canonicalize()

@@ -11,7 +11,7 @@ use std::{
     io::Read,
 };
 
-fn update(status: impl Into<String>, finished: bool) -> Update {
+fn update(status: SessionStatus, finished: bool) -> Update {
     Update {
         worktree_cwd: None,
         commands: None,
@@ -35,7 +35,7 @@ fn update(status: impl Into<String>, finished: bool) -> Update {
         questions: vec![],
         questions_resolved: vec![],
         handoff: None,
-        status: status.into(),
+        status,
         finished,
     }
 }
@@ -481,7 +481,7 @@ pub(crate) fn run(
             client, summary, prompt, settings, controls, store, cancel, tx,
         ),
         Err(error) => {
-            let _ = tx.send_blocking(update(error, true));
+            let _ = tx.send_blocking(update(SessionStatus::error(error), true));
         }
     }
 }
@@ -660,7 +660,14 @@ pub(crate) fn run_with_client(
             let running = snapshot["status"] == "running";
             let current_approvals = approvals(&snapshot);
             let current_question = question(&snapshot);
-            let mut next = update(if running { "Working…" } else { "Ready" }, !running);
+            let mut next = update(
+                if running {
+                    SessionStatus::Working(None)
+                } else {
+                    SessionStatus::Idle
+                },
+                !running,
+            );
             next.start = latest_rows.len();
             if revision != last_revision {
                 let mut projected = snapshot.clone();
@@ -781,7 +788,7 @@ pub(crate) fn run_with_client(
         Ok(())
     })();
     if let Err(error) = result {
-        let mut next = update(error, true);
+        let mut next = update(SessionStatus::error(error), true);
         // Every valid snapshot was already published. An empty error patch
         // preserves any optimistic prompt awaiting a host receipt.
         next.start = latest_rows.len();

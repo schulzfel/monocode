@@ -34,53 +34,20 @@ impl Conversation {
             self.defer_history_action(|this, cx| this.compact_context(cx), cx);
             return;
         }
-        if self.editing_last_turn.pending()
-            || self.stopping
-            || self.attaching
-            || self.input.read(cx).is_composing()
-            || self.account_switching
-            || self.controls.is_some()
-            || self.needs_approval()
-            || !self.questions.is_empty()
-        {
-            return;
-        }
-        if self.busy || !self.follow_ups.state.messages.is_empty() {
-            self.status =
-                "Wait for the current turn and queued messages before compacting context.".into();
-            cx.notify();
-            return;
+        match self.compact_block(cx) {
+            Some(CompactBlock::Quiet) => return,
+            Some(
+                CompactBlock::Busy(message)
+                | CompactBlock::Unsupported(message)
+                | CompactBlock::Failed(message),
+            ) => {
+                self.status = SessionStatus::error(message);
+                cx.notify();
+                return;
+            }
+            None => {}
         }
         let kind = Kind::from_id(&self.summary.provider);
-        if !provider::supports_compact(kind) {
-            self.status = format!(
-                "Context compaction is not supported by the native {} transport.",
-                kind.label()
-            );
-            cx.notify();
-            return;
-        }
-        if self.summary.provider_id.is_none() {
-            self.status = "Send a message before compacting this chat.".into();
-            cx.notify();
-            return;
-        }
-        if self.settings.worktree_removed || self.preparing_worktree || !self.loaded {
-            return;
-        }
-        match locked(&self.store).and_then(|store| store.edit_recovery_reason(self.summary.id)) {
-            Ok(Some(reason)) => {
-                self.status = reason;
-                cx.notify();
-                return;
-            }
-            Err(error) => {
-                self.status = error;
-                cx.notify();
-                return;
-            }
-            Ok(None) => {}
-        }
         self.attach_account(cx);
         let mut settings = self.settings.clone();
         settings.environment.extend(self.app_environment.clone());
@@ -96,7 +63,7 @@ impl Conversation {
         self.busy = true;
         self.submission_generation = self.submission_generation.wrapping_add(1);
         let generation = self.submission_generation;
-        self.status = "Compacting context…".into();
+        self.status = SessionStatus::working("Compacting context…");
         let compact_start = self.transcript.read(cx).source_rows().len();
         let mut compact_tool = ToolCall::new(
             &format!(
@@ -204,12 +171,12 @@ impl Conversation {
                                 input.take(cx);
                             });
                         }
-                        "Ready".into()
+                        SessionStatus::Idle
                     }
-                    Err(error) if error == "Stopped" => "Ready".into(),
-                    Err(error) => error,
+                    Err(error) if error == "Stopped" => SessionStatus::Idle,
+                    Err(error) => SessionStatus::error(error),
                 };
-                if this.status == "Ready" {
+                if this.status.is_idle() {
                     this.run_history_actions(cx);
                     this.pump_follow_ups(cx);
                 }
@@ -219,5 +186,59 @@ impl Conversation {
         })
         .detach();
         cx.notify();
+    }
+}
+
+/// Why `compact_context` would not start now.
+pub(crate) enum CompactBlock {
+    /// The chat is waiting on the person or changing; nothing is shown.
+    Quiet,
+    /// A turn or queued messages come first.
+    Busy(String),
+    /// The harness cannot compact.
+    Unsupported(String),
+    /// The chat cannot compact yet, or its history needs recovery.
+    Failed(String),
+}
+
+impl Conversation {
+    /// The checks `compact_context` makes before it starts, without
+    /// changing the chat.
+    pub(crate) fn compact_block(&self, cx: &gpui::App) -> Option<CompactBlock> {
+        if self.editing_last_turn.pending()
+            || self.stopping
+            || self.attaching
+            || self.input.read(cx).is_composing()
+            || self.account_switching
+            || self.controls.is_some()
+            || self.needs_approval()
+            || !self.questions.is_empty()
+        {
+            return Some(CompactBlock::Quiet);
+        }
+        if self.busy || !self.follow_ups.state.messages.is_empty() {
+            return Some(CompactBlock::Busy(
+                "Wait for the current turn and queued messages before compacting context.".into(),
+            ));
+        }
+        let kind = Kind::from_id(&self.summary.provider);
+        if !provider::supports_compact(kind) {
+            return Some(CompactBlock::Unsupported(format!(
+                "Context compaction is not supported by the native {} transport.",
+                kind.label()
+            )));
+        }
+        if self.summary.provider_id.is_none() {
+            return Some(CompactBlock::Failed(
+                "Send a message before compacting this chat.".into(),
+            ));
+        }
+        if self.settings.worktree_removed || self.preparing_worktree || !self.loaded {
+            return Some(CompactBlock::Quiet);
+        }
+        match locked(&self.store).and_then(|store| store.edit_recovery_reason(self.summary.id)) {
+            Ok(Some(reason)) | Err(reason) => Some(CompactBlock::Failed(reason)),
+            Ok(None) => None,
+        }
     }
 }

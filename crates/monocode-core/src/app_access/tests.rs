@@ -1,5 +1,5 @@
 use super::*;
-use crate::{follow_up::State, notes::NoteUpsert};
+use crate::{follow_up::State, notes::NoteUpsert, store::Store};
 use std::path::Path;
 
 fn model() -> Model {
@@ -277,6 +277,29 @@ fn operator_notes_support_desktop_ids_partial_updates_empty_bodies_and_paginatio
 }
 
 #[test]
+fn a_caller_without_a_session_creates_notes_without_provenance_and_idempotently() {
+    let store = Store::open_monocode(Path::new(":memory:")).unwrap();
+    let projects = ["/project".to_owned()];
+    let write = |request: &str| {
+        notes_action_for(
+            &store,
+            None,
+            request,
+            "notes.write",
+            &json!({"body":"# From a client"}),
+            &projects,
+        )
+        .unwrap()
+    };
+    let created = write("control:Claude Code:note-1");
+    assert!(created["id"].as_str().unwrap().starts_with("control-note-"));
+    assert!(created["sourceSessionId"].is_null());
+    assert_eq!(created["sourceCwd"], "/project");
+    assert_eq!(write("control:Claude Code:note-1")["id"], created["id"]);
+    assert_ne!(write("control:Claude Code:note-2")["id"], created["id"]);
+}
+
+#[test]
 fn launch_identity_and_unsent_prompt_survive_reopen_without_duplicate_sessions() {
     let dir = tempfile::tempdir().unwrap();
     for shared in [false, true] {
@@ -296,6 +319,15 @@ fn launch_identity_and_unsent_prompt_survive_reopen_without_duplicate_sessions()
             .create_app_session(caller.id, "start", "fingerprint", "codex", "/project")
             .unwrap();
         assert!(fresh);
+        let receipt = format!(
+            "operator-app-launch:{}:{}",
+            caller.id,
+            crate::mono::files::content_hash("start")
+        );
+        assert!(
+            store.setting(&receipt).unwrap().is_some(),
+            "Operator launches keep the receipt key earlier builds wrote"
+        );
         store.save_started_link(child.id, caller.id).unwrap();
         store
             .prepare_app_prompt(child.id, "start", "Saved request")
@@ -320,6 +352,24 @@ fn launch_identity_and_unsent_prompt_survive_reopen_without_duplicate_sessions()
         assert!(store
             .create_app_session(caller.id, "start", "different", "codex", "/project")
             .is_err());
+        // Launchers without a caller session name their own key.
+        let keyed = |fingerprint: &str| {
+            store.create_keyed_session(
+                "control-launch:abc",
+                "control-abc",
+                fingerprint,
+                "claude",
+                "/other",
+            )
+        };
+        let (launched, fresh) = keyed("fingerprint").unwrap();
+        assert!(fresh);
+        assert_ne!(launched.id, child.id);
+        assert_eq!(launched.cwd, "/other");
+        let (again, fresh) = keyed("fingerprint").unwrap();
+        assert!(!fresh);
+        assert_eq!(again.id, launched.id);
+        assert!(keyed("changed").is_err());
         let page = store
             .app_conversation(child.id, &json!({}), false, true)
             .unwrap();

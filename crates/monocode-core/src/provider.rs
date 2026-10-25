@@ -993,7 +993,8 @@ impl Protocol {
     ) -> Result<(), String> {
         let id = wire.to_string();
         let title = if kind == "claude" {
-            format!("Allow {}?", request["tool_name"].as_str().unwrap_or("tool"))
+            let name = request["tool_name"].as_str().unwrap_or("tool");
+            format!("Allow {}?", crate::tool::mcp_title(name))
         } else if kind.contains("fileChange") || kind == "applyPatchApproval" {
             "Allow file changes?".into()
         } else if kind.contains("permissions") {
@@ -1385,7 +1386,7 @@ fn run_operation(
     match request.kind {
         Kind::Codex => {
             command.arg("app-server");
-            crate::visual_bridge::configure_codex(&mut command, &request.settings.environment);
+            crate::app_mcp::configure_codex(&mut command, &request.settings.environment);
             if let Some(mono) = &request.settings.mono {
                 if let Some(home) =
                     crate::mono::codex_home(&mono.root, &request.settings.account.id)?
@@ -1431,12 +1432,7 @@ fn run_operation(
                 command.args(["--tools", "Read,Glob,Grep,Bash", "--allowedTools", "Read,Glob,Grep,Bash(git status *),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(pwd),Bash(ls *),Bash(rg *)"]);
             }
             if !settings.text_only {
-                if let Some(server) = crate::visual_bridge::mcp_server(&settings.environment) {
-                    command.args([
-                        "--mcp-config",
-                        &json!({"mcpServers":{"monocode_visual":server}}).to_string(),
-                    ]);
-                }
+                crate::app_mcp::configure_claude(&mut command, &settings.environment);
             }
             if mode == "bypassPermissions" {
                 command.arg("--allow-dangerously-skip-permissions");

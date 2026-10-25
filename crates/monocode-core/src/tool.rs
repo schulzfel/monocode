@@ -1,7 +1,11 @@
 //! Provider-neutral tool presentation, persisted as a native `tool` row.
 use serde::{Deserialize, Serialize};
+mod label;
+mod mcp;
 mod presentation;
 pub mod tasks;
+pub use label::ToolKind;
+pub(crate) use mcp::title as mcp_title;
 pub use presentation::{CommandStep, ToolPresentation};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,13 +61,25 @@ impl ToolCall {
         }
     }
     pub fn summary(&self) -> (String, String) {
+        let (action, target, _) = self.described();
+        (action, target)
+    }
+    /// [`Self::summary`] of a built-in tool, which consumers may sort and
+    /// count calls by; `None` for an MCP server's, whose action never names
+    /// a built-in one, whatever it reads ("Search · Linear").
+    pub fn builtin_summary(&self) -> Option<(String, String)> {
+        let (action, target, builtin) = self.described();
+        builtin.then_some((action, target))
+    }
+    fn described(&self) -> (String, String, bool) {
         match self.panel() {
-            Some(tasks::Panel::Tasks(list)) => return ("Tasks".into(), list.progress()),
-            Some(tasks::Panel::Agent(run)) => return ("Agent".into(), run.title().into()),
+            Some(tasks::Panel::Tasks(list)) => return ("Tasks".into(), list.progress(), true),
+            Some(tasks::Panel::Agent(run)) => return ("Agent".into(), run.title().into(), true),
             None => {}
         }
         let shown = self.presentation();
-        (shown.action, shown.target)
+        let builtin = shown.kind == ToolKind::BuiltIn;
+        (shown.action, shown.target, builtin)
     }
 }
 

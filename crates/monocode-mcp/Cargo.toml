@@ -1,0 +1,42 @@
+[package]
+workspace = "../monocode-gpui"
+name = "monocode-mcp"
+version.workspace = true
+edition = "2024"
+# The first stable release with `std::hint::cold_path`, which the vendored GPUI needs.
+rust-version = "1.95"
+license.workspace = true
+publish = false
+description = "MonoCode's MCP server: Streamable HTTP served by the app, and the `monocode-gpui mcp` stdio relay onto monocode-control."
+
+[dependencies]
+monocode-control = { path = "../monocode-control" }
+rmcp = { version = "3.7", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt", "sync", "time", "net"] }
+# The HTTP server under rmcp's Streamable HTTP service; all already in rmcp's tree.
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+rmcp = { version = "3.7", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-client-reqwest"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util", "sync", "time", "net"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "warn"

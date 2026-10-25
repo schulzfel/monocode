@@ -2,6 +2,7 @@
 pub mod accounts;
 pub mod agent;
 pub mod app_access;
+pub mod app_mcp;
 pub mod app_update;
 pub mod automations;
 pub mod catalog;
@@ -30,6 +31,7 @@ pub mod session_groups;
 pub mod session_title;
 pub mod store;
 pub mod time;
+mod token;
 pub mod tool;
 pub mod transcript;
 pub mod usage;

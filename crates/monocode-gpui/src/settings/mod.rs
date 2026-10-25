@@ -6,16 +6,20 @@ mod keymap;
 #[cfg(test)]
 mod layout_tests;
 mod management;
+mod mcp_server;
+#[cfg(test)]
+mod mcp_server_tests;
 mod model;
 mod notification_preferences;
 mod pages;
 mod palettes;
 mod preferences;
 mod skill_document;
-pub(crate) use palettes::palette;
+pub(crate) use palettes::{PALETTES, palette};
 pub(crate) mod widgets;
 
 pub(crate) use keymap::apply as apply_keybindings;
+pub(crate) use mcp_server::{ControlActivity, ExternalControlEdit, ExternalControlStatus, Handoff};
 pub(crate) use model::Section;
 pub(crate) use pages::command_shortcut;
 pub(crate) use preferences::{ModelChoice, Preferences, UI_SCALE_PERCENTS};
@@ -65,6 +69,8 @@ pub(crate) struct SettingsContext {
     pub mobile: Option<monocode_core::mobile::Status>,
     /// The pairing code on show.
     pub mobile_invite: Option<monocode_core::mobile::Invite>,
+    /// The MCP server; `None` before the shell reports it.
+    pub external_control: Option<ExternalControlStatus>,
 }
 impl PartialEq for SettingsContext {
     fn eq(&self, other: &Self) -> bool {
@@ -87,6 +93,7 @@ impl PartialEq for SettingsContext {
             && self.inbox_connections == other.inbox_connections
             && self.mobile == other.mobile
             && self.mobile_invite == other.mobile_invite
+            && self.external_control == other.external_control
     }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -134,6 +141,7 @@ pub(crate) enum SettingsEvent {
     MobilePair,
     MobileCancelInvite,
     MobileRevoke(String),
+    ExternalControl(ExternalControlEdit),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -253,6 +261,7 @@ pub(crate) struct SettingsView {
     accent_custom_open: bool,
     accent_anchor: AnchorSlot,
     mobile: pages::MobileState,
+    mcp_server: pages::McpServerState,
     _subscriptions: Vec<Subscription>,
 }
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -388,6 +397,7 @@ impl SettingsView {
             accent_custom_open: false,
             accent_anchor: AnchorSlot::default(),
             mobile: pages::MobileState::default(),
+            mcp_server: pages::McpServerState::default(),
             _subscriptions: subscriptions,
         };
         this.watch_mobile(cx);

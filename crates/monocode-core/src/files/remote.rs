@@ -8,8 +8,7 @@ const UNAVAILABLE: &str = "This isn’t available for projects on another machin
 const OUTDATED: &str = "Update MonoCode Host in Connections settings to use this project’s files.";
 
 pub fn is_remote(path: &Path) -> bool {
-    path.to_str()
-        .is_some_and(|path| path.starts_with("remote://"))
+    path.to_str().is_some_and(crate::remote::is_remote_path)
 }
 
 /// Run one of the same bounded workspace commands supported by the Tauri app.

@@ -9,6 +9,8 @@ publish = false
 serde.workspace = true
 serde_json.workspace = true
 monocode-core = { path = "../monocode-core" }
+monocode-control = { path = "../monocode-control" }
+monocode-mcp = { path = "../monocode-mcp" }
 pulldown-cmark = "0.13"
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false }
@@ -50,6 +52,9 @@ qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["test-support"] }
+# A real MCP client over Streamable HTTP for the app's own MCP server.
+rmcp = { version = "3.7", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
+tokio = { version = "1", features = ["rt", "macros"] }
 
 # The vendored renderer's backdrop-blur marker for frosted popovers.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -73,7 +78,7 @@ parking_lot = "0.12"
 # Experimental native builds resolve separately from the production Tauri app.
 [workspace]
 resolver = "2"
-members = [".", "../monocode-core"]
+members = [".", "../monocode-core", "../monocode-control", "../monocode-mcp"]
 
 [workspace.package]
 version = "0.16.0"

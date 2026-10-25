@@ -121,6 +121,13 @@ MONOCODE_NATIVE_DATA_DIR=/tmp/monocode-native-lab npm run native:dev -- --fixtur
 Fixtures are refused with production data. Use a fresh temporary directory when
 you want an empty fixture store.
 
+## External control
+
+Agents in other apps (Claude Code, Codex, Cursor, Claude Desktop) can drive the
+window over MCP once Settings → General → MCP server is on. See
+[MCP server](mcp.md) for setup, scopes, confirmations and the tool
+reference.
+
 ## Contributing
 
 See [architecture](migration.md) for the crate boundaries and renderer patches,

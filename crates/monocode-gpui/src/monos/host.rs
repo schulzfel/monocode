@@ -289,7 +289,7 @@ impl Monos {
                     let placement = self
                         .owner
                         .update(cx, |owner, cx| {
-                            owner.app_placement(&input, call.session, &project, cx)
+                            owner.app_placement(&input, Some(call.session), &project, cx)
                         })
                         .map_err(|e| e.to_string())??;
                     Ok::<_, String>((prompt, provider, kind, source_provider, settings, placement))

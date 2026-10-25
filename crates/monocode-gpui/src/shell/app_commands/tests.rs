@@ -1,6 +1,6 @@
 use super::*;
 use gpui::{TestAppContext, WindowHandle};
-use monocode_core::store::Store;
+use monocode_core::{agent::Settings, store::Store};
 use std::sync::mpsc;
 
 fn setup(cx: &mut TestAppContext) -> (WindowHandle<Shell>, i64, i64) {

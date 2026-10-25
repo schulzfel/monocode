@@ -25,7 +25,7 @@ pub(super) fn prepare(
             .ok()
             .is_some_and(|tool| {
                 matches!(
-                    tool.summary().0.as_str(),
+                    tool.builtin_summary().unwrap_or_default().0.as_str(),
                     "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
                 )
             })

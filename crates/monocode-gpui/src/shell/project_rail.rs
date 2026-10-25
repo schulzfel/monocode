@@ -1657,9 +1657,9 @@ impl Shell {
             );
         }
         self.project_rail_list.settling = Some(rail_shift_key(&drag.path, drag.group));
-        let subset: HashSet<String> = drag.order.iter().cloned().collect();
-        let mut order = reordered.into_iter();
         if drag.group {
+            let subset: HashSet<String> = drag.order.iter().cloned().collect();
+            let mut order = reordered.into_iter();
             let groups: HashMap<_, _> = self
                 .workspace
                 .project_rail_groups
@@ -1675,13 +1675,7 @@ impl Shell {
                 }
             }
         } else {
-            for path in &mut self.workspace.projects {
-                if subset.contains(path.as_str())
-                    && let Some(id) = order.next()
-                {
-                    *path = id;
-                }
-            }
+            self.apply_project_order(reordered);
         }
         self.project_rail_list.skip_click = true;
         if cx.reduce_motion() {

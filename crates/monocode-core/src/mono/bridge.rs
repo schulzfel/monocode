@@ -1,8 +1,8 @@
 //! Session-scoped local app access. Provider children inherit only their own
 //! capability; all requests are checked again against the Mono's project list.
+use crate::token::session_token;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read, Write},
@@ -116,16 +116,13 @@ impl Server {
     pub fn environment(&self, session: i64) -> HashMap<String, String> {
         HashMap::from([
             ("MONOCODE_APP_ENDPOINT".into(), self.endpoint.clone()),
-            ("MONOCODE_APP_TOKEN".into(), token(&self.secret, session)),
+            (
+                "MONOCODE_APP_TOKEN".into(),
+                session_token(&self.secret, session),
+            ),
             ("MONOCODE_APP_SESSION".into(), session.to_string()),
         ])
     }
-}
-fn token(secret: &str, session: i64) -> String {
-    Sha256::digest(format!("{secret}:{session}").as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 fn serve(
     mut stream: TcpStream,
@@ -145,15 +142,7 @@ fn serve(
         return Err("Invalid app request".into());
     }
     let wire: Wire = serde_json::from_str(&line).map_err(|_| "Invalid app request")?;
-    let expected = token(secret, wire.session);
-    let equal = wire.token.len() == expected.len()
-        && wire
-            .token
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0, |diff, (a, b)| diff | a ^ b)
-            == 0;
-    if !equal
+    if !crate::token::same(&wire.token, &session_token(secret, wire.session))
         || !wire.input.is_object()
         || wire.request_id.len() > 128
         || wire.request_id.is_empty()

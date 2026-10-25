@@ -68,6 +68,7 @@ impl Shell {
             remote: Some(self.remote.clone()),
             mobile: self.mobile_status(),
             mobile_invite: self.mobile.invite.clone(),
+            external_control: Some(self.control_status()),
             quick_error: self.quick.error.clone(),
             inbox_connections: self
                 .inbox
@@ -168,23 +169,13 @@ impl Shell {
                         .update(cx, |notice, cx| notice.check_now(hidden, cx));
                 }
                 SettingsEvent::Changed(prefs) => {
-                    this.workspace.preferences = *prefs.clone();
-                    this.apply_preferences(cx);
-                    this.persist(cx);
-                    this.invalidate_chrome(cx);
-                    cx.notify();
+                    this.update_preferences(|p| *p = *prefs.clone(), cx);
                 }
                 SettingsEvent::NewLayout(on) => {
-                    if this.workspace.classic_layout == *on {
-                        this.toggle_layout(cx);
-                    }
+                    this.set_classic_layout(!*on, cx);
                     this.sync_settings(cx);
                 }
-                SettingsEvent::NewLayoutBoxy(boxy) => {
-                    this.workspace.new_layout_boxy = *boxy;
-                    this.layout_changed(cx);
-                    this.sync_settings(cx);
-                }
+                SettingsEvent::NewLayoutBoxy(boxy) => this.set_layout_boxy(*boxy, cx),
                 SettingsEvent::OpenSession(id) => {
                     this.close_settings(window, cx);
                     this.open(*id, window, cx);
@@ -243,6 +234,7 @@ impl Shell {
                 SettingsEvent::MobilePair => this.pair_mobile(cx),
                 SettingsEvent::MobileCancelInvite => this.mobile_cancel_invite(cx),
                 SettingsEvent::MobileRevoke(id) => this.mobile_revoke(id, cx),
+                SettingsEvent::ExternalControl(edit) => this.edit_control(edit, cx),
             },
         ));
         // This dialog is painted at the window root, like React's portal.
@@ -328,9 +320,13 @@ impl Shell {
         .detach();
     }
     pub(super) fn default_kind(&self) -> Kind {
+        self.default_kind_for(&self.workspace.project)
+    }
+    /// The provider new chats in `project` use.
+    pub(super) fn default_kind_for(&self, project: &str) -> Kind {
         let p = &self.workspace.preferences;
         p.project_providers
-            .get(&self.workspace.project)
+            .get(project)
             .and_then(|p| p.provider.as_deref())
             .or(p.default_provider.as_deref())
             .and_then(Kind::parse)

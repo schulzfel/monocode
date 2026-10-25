@@ -67,7 +67,7 @@ impl Conversation {
                 .btw
                 .as_ref()
                 .is_some_and(|sheet| sheet.read(cx).is_open() || sheet.read(cx).is_running())
-            || self.status != "Ready"
+            || !self.status.is_idle()
             || self.settings.mono.is_some()
             || self.account_switching
             || self.preparing_worktree
@@ -148,7 +148,7 @@ impl Conversation {
                         });
                         this.history_unloaded = false;
                         this.sync_review(cx);
-                        this.status = "Ready".into();
+                        this.status = SessionStatus::Idle;
                         if let Some((row, query)) = this.pending_search.take() {
                             this.reveal_search(row, query, cx);
                         }
@@ -156,7 +156,7 @@ impl Conversation {
                         this.pump_follow_ups(cx);
                         this.mono_flush_external(cx);
                     }
-                    Err(error) => this.status = error,
+                    Err(error) => this.status = SessionStatus::error(error),
                 }
                 cx.emit(SessionChanged);
                 cx.notify();
@@ -182,7 +182,7 @@ mod tests {
         let chat = cx.new(|cx| Conversation::new(session, Arc::new(Mutex::new(store)), cx));
         chat.update(cx, |chat, cx| {
             chat.loaded = true;
-            chat.status = "Ready".into();
+            chat.status = SessionStatus::Idle;
             chat.settings.revision = 7;
             chat.settings.model = Some("chosen-model".into());
             chat.transcript.update(cx, |view, cx| {
@@ -201,9 +201,9 @@ mod tests {
             chat.busy = true;
             assert!(!chat.unload_history(cx));
             chat.busy = false;
-            chat.status = "Could not save history".into();
+            chat.status = SessionStatus::error("Could not save history");
             assert!(!chat.unload_history(cx));
-            chat.status = "Ready".into();
+            chat.status = SessionStatus::Idle;
             chat.attachments.push("/tmp/unsent-image.png".into());
             assert!(!chat.unload_history(cx));
             chat.attachments.clear();
