@@ -62,6 +62,10 @@ impl Operation for WorktreeList {
     type Input = ProjectInput;
     type Output = WorktreeListOutput;
 
+    fn project_slot(input: &mut ProjectInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
+
     fn summary(output: &WorktreeListOutput) -> String {
         format!(
             "{} worktrees, {} branches in {}",
@@ -80,7 +84,8 @@ pub struct WorktreeCreate;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorktreeCreateInput {
-    /// A local project's path or key; the current project when absent.
+    /// A local project's path or key; when absent, the calling agent
+    /// session's project, or for other clients the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// The branch to create, or to check out with `existing`.
@@ -112,6 +117,10 @@ impl Operation for WorktreeCreate {
     const HINTS: Hints = Hints::CHANGE;
     type Input = WorktreeCreateInput;
     type Output = WorktreeCreateOutput;
+
+    fn project_slot(input: &mut WorktreeCreateInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
 
     fn summary(output: &WorktreeCreateOutput) -> String {
         format!(

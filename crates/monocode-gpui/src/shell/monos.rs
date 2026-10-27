@@ -69,7 +69,9 @@ impl Shell {
                     id,
                     title: metadata.summary.title.clone(),
                     cwd: metadata.summary.cwd.clone(),
-                    busy: metadata.busy || live.is_some_and(|v| v.mono_external_pending()),
+                    // A control client's message waiting for the chat to
+                    // load is as good as running: its turn is still to come.
+                    busy: metadata.busy || live.is_some_and(Conversation::external_waiting),
                     has_messages: metadata.summary.has_messages,
                     archived: metadata.summary.archived,
                     updated_at: metadata.summary.updated_at,
@@ -140,20 +142,5 @@ impl Shell {
     ) {
         self.groups.insert(project, groups);
         self.invalidate_chrome(cx);
-    }
-    pub(crate) fn mono_remove(
-        &mut self,
-        id: i64,
-        delete: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if delete {
-            self.delete_session(id, window, cx);
-        } else if self.session_summaries.contains_key(&id)
-            && !self.session_metadata(id, cx).summary.archived
-        {
-            self.toggle_archive(id, cx);
-        }
     }
 }

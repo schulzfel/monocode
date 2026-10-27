@@ -16,8 +16,14 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 /// The largest frame the app may send.
 pub const MAX_RESPONSE_BYTES: usize = 4 << 20;
-/// The most connections the app serves at once.
+/// The most connections of external clients the app serves at once.
 pub const MAX_CONNECTIONS: usize = 16;
+/// The most connections of the agent sessions the app runs itself (hellos
+/// with a session credential) it serves at once, beside the external ones.
+pub const MAX_APP_CONNECTIONS: usize = 256;
+/// The most connections that may wait to say hello at once, before the
+/// app knows which kind they are.
+pub const MAX_PENDING_HELLOS: usize = 32;
 
 /// Who is calling, as the client reports it. Self-reported, so it guards
 /// against surprises, not impersonation. Fields it does not know, such as

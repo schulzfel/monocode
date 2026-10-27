@@ -14,8 +14,20 @@ use monocode_control::{
         lifecycle::SessionHandoffInput,
         model::ModelListInput,
         mono::{MonoInput, MonoListInput, MonoSendInput},
+        mono_artifact::{
+            ArtifactInput, ArtifactKind, MonoArtifactListInput, MonoArtifactWriteInput,
+        },
+        mono_card::MonoCardPostInput,
+        mono_habit::{
+            HabitInput, HabitSchedule, MonoHabitAddInput, MonoHabitListInput, MonoHabitUpdateInput,
+        },
+        mono_memory::{
+            MonoMemoryAddInput, MonoMemoryReadInput, MonoMemoryRemoveInput, MonoMemoryReplaceInput,
+            MonoMemorySearchInput,
+        },
+        mono_soul::{MonoSoulReadInput, MonoSoulUpdateInput},
         notes::{NotesListInput, NotesReadInput, NotesWriteInput},
-        organize::{ProjectInput, SessionMoveInput, SessionRenameInput},
+        organize::{ProjectInput, SessionArchiveInput, SessionMoveInput, SessionRenameInput},
         project::{ProjectAddInput, ProjectListInput, ProjectSelectInput},
         question::{ItemAnswer, QuestionAnswerInput, QuestionListInput},
         queue::{QueueEditInput, QueueItemInput},
@@ -38,6 +50,7 @@ pub fn commands() -> Vec<Command> {
     commands.extend(session_commands());
     commands.extend(workspace_commands());
     commands.extend(lifecycle_commands());
+    commands.extend(mono_commands());
     commands
 }
 
@@ -68,6 +81,7 @@ fn app_commands() -> Vec<Command> {
             before: Some("row-4".into()),
             limit: Some(2),
             max_chars: Some(500),
+            ..SessionReadInput::default()
         }),
         Command::SessionStatus(SessionInput { session_id: 3 }),
         Command::SessionStart(SessionStartInput {
@@ -78,7 +92,7 @@ fn app_commands() -> Vec<Command> {
         Command::SessionSend(SessionSendInput {
             session_id: 3,
             prompt: "And the docs".into(),
-            mode: None,
+            ..SessionSendInput::default()
         }),
         Command::SessionWait(SessionWaitInput {
             session_id: 3,
@@ -122,7 +136,10 @@ fn session_commands() -> Vec<Command> {
             session_id: 3,
             title: "Docs".into(),
         }),
-        Command::SessionArchive(session.clone()),
+        Command::SessionArchive(SessionArchiveInput {
+            session_id: 3,
+            stop: Some(true),
+        }),
         Command::SessionRestore(session.clone()),
         Command::FolderList(ProjectInput::default()),
         Command::SessionMove(SessionMoveInput {
@@ -292,6 +309,74 @@ fn lifecycle_commands() -> Vec<Command> {
         Command::MonoSend(MonoSendInput {
             mono_id: "m1".into(),
             text: "Hello".into(),
+        }),
+    ]
+}
+
+/// The calls only a Mono makes, on its own memory, soul, habits, artifacts
+/// and chat.
+fn mono_commands() -> Vec<Command> {
+    let daily = HabitSchedule {
+        schedule_kind: "daily".into(),
+        time: Some("09:00".into()),
+        ..HabitSchedule::default()
+    };
+    let habit = HabitInput { id: "h1".into() };
+    vec![
+        Command::MonoMemoryRead(MonoMemoryReadInput {
+            topic: Some("Tooling".into()),
+        }),
+        Command::MonoMemorySearch(MonoMemorySearchInput {
+            query: "release checklist".into(),
+            since: Some("7d".into()),
+        }),
+        Command::MonoMemoryAdd(MonoMemoryAddInput {
+            fact: "Releases ship on Fridays".into(),
+            until: Some("2026-12-31".into()),
+            ..MonoMemoryAddInput::default()
+        }),
+        Command::MonoMemoryReplace(MonoMemoryReplaceInput {
+            find: "Fridays".into(),
+            fact: "Releases ship on Thursdays".into(),
+            ..MonoMemoryReplaceInput::default()
+        }),
+        Command::MonoMemoryRemove(MonoMemoryRemoveInput {
+            find: "Thursdays".into(),
+            topic: None,
+        }),
+        Command::MonoSoulRead(MonoSoulReadInput {}),
+        Command::MonoSoulUpdate(MonoSoulUpdateInput {
+            text: "# Soul\nBe brief.\n".into(),
+            expected_hash: "e3b0c442".into(),
+        }),
+        Command::MonoHabitList(MonoHabitListInput {}),
+        Command::MonoHabitAdd(MonoHabitAddInput {
+            name: "Morning digest".into(),
+            instructions: "Summarize yesterday's changes".into(),
+            schedule: daily.clone(),
+        }),
+        Command::MonoHabitUpdate(MonoHabitUpdateInput {
+            id: "h1".into(),
+            enabled: Some(false),
+            ..MonoHabitUpdateInput::default()
+        }),
+        Command::MonoHabitRun(habit.clone()),
+        Command::MonoHabitRemove(habit),
+        Command::MonoArtifactList(MonoArtifactListInput {
+            kind: Some(ArtifactKind::Html),
+            limit: Some(10),
+            cursor: Some("10".into()),
+        }),
+        Command::MonoArtifactRead(ArtifactInput { id: "a1".into() }),
+        Command::MonoArtifactWrite(MonoArtifactWriteInput {
+            title: "Release notes".into(),
+            body: "# 0.16\nShipped.".into(),
+            summary: Some("What shipped".into()),
+            ..MonoArtifactWriteInput::default()
+        }),
+        // A card that names no session: posting one is not an action on it.
+        Command::MonoCardPost(MonoCardPostInput::Choices {
+            options: vec!["Ship it".into(), "Wait".into()],
         }),
     ]
 }

@@ -19,7 +19,8 @@ pub struct NotesList;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NotesListInput {
     /// Only notes of this local project (path or key), and notes of none;
-    /// every local project's when absent.
+    /// when absent, an agent session sees its own project's, other clients
+    /// every local project's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// `nextCursor` from the previous page.
@@ -133,8 +134,9 @@ pub struct NotesWriteInput {
     /// An existing note to update; a new note is created when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// For a new note: the local project it belongs to (path or key); the
-    /// current project when absent.
+    /// For a new note: the local project it belongs to (path or key); when
+    /// absent, the calling agent session's project, or for other clients
+    /// the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// Its title; a new note takes it from the text when absent.
@@ -157,6 +159,11 @@ impl Operation for NotesWrite {
     const HINTS: Hints = Hints::CHANGE;
     type Input = NotesWriteInput;
     type Output = NoteOutput;
+
+    fn project_slot(input: &mut NotesWriteInput) -> Option<&mut Option<String>> {
+        // A new note goes in the default project; an update keeps its own.
+        input.id.is_none().then_some(&mut input.project)
+    }
 
     fn summary(output: &NoteOutput) -> String {
         format!("Saved note “{}” ({})", output.title, output.id)

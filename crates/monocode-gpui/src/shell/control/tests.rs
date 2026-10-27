@@ -92,7 +92,7 @@ pub(super) fn call(
                 Request::Call {
                     caller: client.into(),
                     request_id: request_id.map(str::to_owned),
-                    command,
+                    command: Box::new(command),
                     reply,
                 },
                 window,

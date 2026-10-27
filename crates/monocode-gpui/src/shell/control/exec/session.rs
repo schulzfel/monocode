@@ -64,6 +64,40 @@ impl Shell {
                 )
             })
     }
+    /// The project `caller`'s call acts on, as `project` names it, or by
+    /// default: for a Mono the assigned project it resolves to
+    /// (`Mono::project`), whether or not the window lists it, as the
+    /// bridge's calls did; for anyone else a project of the window
+    /// ([`Self::control_project`]).
+    pub(in crate::shell::control) fn control_project_for(
+        &self,
+        caller: &CallerKind,
+        project: Option<&str>,
+        cx: &App,
+    ) -> Result<String, ControlError> {
+        match caller {
+            CallerKind::Mono { mono, .. } => {
+                let mono = self
+                    .caller_mono(mono, cx)
+                    .ok_or_else(|| ControlError::new(ErrorCode::NotFound, caller::MONO_GONE))?;
+                defaults::mono_project(mono, project)
+            }
+            CallerKind::Session(_) | CallerKind::External(_) => self.control_project(project),
+        }
+    }
+    /// As [`Self::control_project_for`], refusing remote projects.
+    pub(in crate::shell::control) fn control_local_project_for(
+        &self,
+        caller: &CallerKind,
+        project: Option<&str>,
+        cx: &App,
+    ) -> Result<String, ControlError> {
+        let path = self.control_project_for(caller, project, cx)?;
+        if is_remote_path(&path) {
+            return Err(remote_unsupported());
+        }
+        Ok(path)
+    }
     /// As [`Self::control_project`], refusing remote projects.
     pub(in crate::shell::control) fn control_local_project(
         &self,
@@ -76,16 +110,52 @@ impl Shell {
         Ok(path)
     }
     /// Checks that session `id` exists and is a project session, not a Mono's
-    /// own chat.
+    /// own chat or habit run, nor a launch a Mono keeps out of the sidebar.
     pub(in crate::shell::control) fn control_session(
         &self,
         id: i64,
         cx: &App,
     ) -> Result<(), ControlError> {
-        let mono = self
-            .monos
-            .as_ref()
-            .is_some_and(|m| m.read(cx).is_mono_session(id) || m.read(cx).hidden_session(id));
+        self.control_visible(id, false, cx)
+    }
+    /// As [`Self::control_session`] for `caller`'s call: a Mono also reaches
+    /// the launches Monos keep out of the sidebar, as its old app actions
+    /// did (MO-22); nobody reaches a Mono's own chat or habit run.
+    pub(in crate::shell::control) fn control_session_for(
+        &self,
+        caller: &CallerKind,
+        id: i64,
+        cx: &App,
+    ) -> Result<(), ControlError> {
+        let launches = match caller {
+            CallerKind::Mono { .. } => true,
+            CallerKind::Session(_) | CallerKind::External(_) => false,
+        };
+        self.control_visible(id, launches, cx)
+    }
+    /// As [`Self::control_session_for`] for a call that only reads: a
+    /// session's read also reaches the launches Monos keep out of the
+    /// sidebar, as Operator's reads did (OP-79). Changing one stays the
+    /// Mono's.
+    pub(in crate::shell::control) fn control_readable_for(
+        &self,
+        caller: &CallerKind,
+        id: i64,
+        cx: &App,
+    ) -> Result<(), ControlError> {
+        let launches = match caller {
+            CallerKind::Mono { .. } | CallerKind::Session(_) => true,
+            CallerKind::External(_) => false,
+        };
+        self.control_visible(id, launches, cx)
+    }
+    /// Checks that session `id` is a project session, showing hidden
+    /// launches when `launches` says so.
+    fn control_visible(&self, id: i64, launches: bool, cx: &App) -> Result<(), ControlError> {
+        let mono = self.monos.as_ref().is_some_and(|m| {
+            let m = m.read(cx);
+            m.is_mono_session(id) || (!launches && m.hidden_session(id))
+        });
         if !self.session_summaries.contains_key(&id) || self.deleting.contains(&id) || mono {
             return Err(no_session(id));
         }
@@ -98,6 +168,24 @@ impl Shell {
         cx: &App,
     ) -> Result<(), ControlError> {
         self.control_session(id, cx)?;
+        self.control_local_cwd(id, cx)
+    }
+    /// As [`Self::control_session_for`], refusing remote sessions.
+    pub(in crate::shell::control) fn control_local_session_for(
+        &self,
+        caller: &CallerKind,
+        id: i64,
+        cx: &App,
+    ) -> Result<(), ControlError> {
+        self.control_session_for(caller, id, cx)?;
+        self.control_local_cwd(id, cx)
+    }
+    /// Refuses session `id` when it is remote.
+    pub(in crate::shell::control) fn control_local_cwd(
+        &self,
+        id: i64,
+        cx: &App,
+    ) -> Result<(), ControlError> {
         if is_remote_path(&self.session_metadata(id, cx).summary.cwd) {
             return Err(remote_unsupported());
         }
@@ -147,9 +235,39 @@ impl Shell {
         }
     }
 
-    pub(super) fn control_session_list(
+    /// The sessions of `input`'s project, as a client sees them.
+    pub(in crate::shell::control) fn control_session_list(
         &self,
         input: &SessionListInput,
+        cx: &App,
+    ) -> Result<SessionListOutput, ControlError> {
+        let project = self.control_project(input.project.as_deref())?;
+        self.control_sessions_of(input, project, false, cx)
+    }
+
+    /// The sessions of `input`'s project, as `caller` sees them. A Mono also
+    /// lists the launches Monos keep out of the sidebar, wherever the window
+    /// keeps them, and orchestration workers, as its old app actions did
+    /// (MO-22).
+    pub(super) fn control_session_list_for(
+        &self,
+        input: &SessionListInput,
+        caller: &CallerKind,
+        cx: &App,
+    ) -> Result<SessionListOutput, ControlError> {
+        let project = self.control_project_for(caller, input.project.as_deref(), cx)?;
+        let mono = match caller {
+            CallerKind::Mono { .. } => true,
+            CallerKind::Session(_) | CallerKind::External(_) => false,
+        };
+        self.control_sessions_of(input, project, mono, cx)
+    }
+
+    fn control_sessions_of(
+        &self,
+        input: &SessionListInput,
+        project: String,
+        mono: bool,
         cx: &App,
     ) -> Result<SessionListOutput, ControlError> {
         let limit = ops::limit(
@@ -157,17 +275,25 @@ impl Shell {
             DEFAULT_SESSIONS_PER_PAGE,
             MAX_SESSIONS_PER_PAGE,
         )?;
-        let project = self.control_project(input.project.as_deref())?;
         let key = path_key(&project);
         let archived = input.archived.unwrap_or_default();
+        let listed: HashSet<i64> = self.order.iter().copied().collect();
+        let mut unlisted: Vec<i64> = self
+            .session_summaries
+            .keys()
+            .copied()
+            .filter(|id| mono && !listed.contains(id))
+            .collect();
+        unlisted.sort_unstable();
         let mut all: Vec<_> = self
             .order
             .iter()
             .copied()
+            .chain(unlisted)
             .filter(|id| {
                 self.session_summaries.contains_key(id)
-                    && self.control_session(*id, cx).is_ok()
-                    && !self.orchestration_worker(*id)
+                    && self.control_visible(*id, mono, cx).is_ok()
+                    && (mono || !self.orchestration_worker(*id))
             })
             .map(|id| self.control_summary(id, cx))
             .filter(|s| path_key(&s.project) == key)
@@ -190,10 +316,16 @@ impl Shell {
     pub(super) fn control_session_read(
         &mut self,
         input: SessionReadInput,
+        caller: &CallerKind,
         cx: &mut Context<Self>,
     ) -> Result<Exec, ControlError> {
         let id = input.session_id;
-        self.control_session(id, cx)?;
+        if input.before.is_some() && input.before_index.is_some() {
+            return Err(ControlError::invalid_input(
+                "Pass before or beforeIndex, not both.",
+            ));
+        }
+        self.control_readable_for(caller, id, cx)?;
         let metadata = self.session_metadata(id, cx);
         let busy = metadata.busy;
         let draft = metadata.has_saved_draft();
@@ -203,6 +335,10 @@ impl Shell {
         });
         if let Some(before) = input.before {
             page["before"] = before.into();
+        }
+        // A number is Operator's turn index, clamped to the turns there are.
+        if let Some(index) = input.before_index {
+            page["before"] = index.into();
         }
         let store = self.store.clone();
         Ok(Exec::Later(cx.background_executor().spawn(async move {
@@ -217,9 +353,10 @@ impl Shell {
     pub(super) fn control_session_status(
         &mut self,
         id: i64,
+        caller: &CallerKind,
         cx: &mut Context<Self>,
     ) -> Result<Exec, ControlError> {
-        self.control_session(id, cx)?;
+        self.control_readable_for(caller, id, cx)?;
         let (mut status, loaded) = self.control_status_now(id, cx);
         if loaded {
             return ready(Ok(status));

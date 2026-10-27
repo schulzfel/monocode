@@ -171,7 +171,7 @@ impl Operation for ProjectDelete {
     const TITLE: &'static str = "Remove project";
     const SUBJECT: &'static [&'static str] = &["project"];
     const SCOPE: Scope = Scope::Destructive;
-    const DESCRIPTION: &'static str = "Remove a local project from MonoCode and delete its saved sessions, after the person confirms in MonoCode. Files on disk are never deleted: the folder stays, and adding it again brings the project back empty. Declining, or no answer within two minutes, fails with user_declined and changes nothing.";
+    const DESCRIPTION: &'static str = "Remove a local project from MonoCode and delete its saved sessions, after the person confirms in MonoCode. An agent session is not asked to confirm, but cannot remove its own project or one with an orchestration's workers. Files on disk are never deleted: the folder stays, and adding it again brings the project back empty. Declining, or no answer within two minutes, fails with user_declined and changes nothing.";
     const HINTS: Hints = Hints::DISCARD;
     const CONFIRM: bool = true;
     type Input = ProjectTarget;

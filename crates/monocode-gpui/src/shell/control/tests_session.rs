@@ -11,7 +11,7 @@ use monocode_control::{
     ops::{
         configure::SessionConfigureInput,
         dispatch::{SessionStartInput, SessionWaitInput},
-        organize::SessionRenameInput,
+        organize::{SessionArchiveInput, SessionRenameInput},
         project::ProjectListInput,
         session::{SessionInput, SessionListInput},
     },
@@ -275,7 +275,10 @@ fn a_session_cannot_stop_archive_delete_configure_or_wait_on_itself(cx: &mut Tes
     });
     for command in [
         Command::SessionStop(own.clone()),
-        Command::SessionArchive(own.clone()),
+        Command::SessionArchive(SessionArchiveInput {
+            session_id: b,
+            stop: None,
+        }),
         Command::SessionDelete(own),
         configure,
         wait(b),

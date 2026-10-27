@@ -1,13 +1,20 @@
 //! Tools generated from the control catalog: one per operation, with its
 //! schemas and annotations, and no per-tool code.
+use crate::Role;
 use monocode_control::{Command, ControlError, Descriptor, REQUEST_ID, catalog, frame, hints_of};
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// Every tool, in catalog order.
-pub(crate) fn tools() -> Vec<Tool> {
-    catalog().into_iter().map(tool).collect()
+/// The tools a relay for `role` lists, in catalog order: every operation,
+/// less those only a Mono may call unless it speaks for one. Calls are not
+/// limited to the list ([`command`]); the app decides.
+pub(crate) fn tools(role: Role) -> Vec<Tool> {
+    catalog()
+        .into_iter()
+        .filter(|d| role == Role::Mono || !d.mono_only)
+        .map(tool)
+        .collect()
 }
 
 fn tool(descriptor: Descriptor) -> Tool {
@@ -78,13 +85,42 @@ mod tests {
 
     #[test]
     fn tools_are_titled_like_a_person_says_them() {
-        for (tool, descriptor) in tools().into_iter().zip(catalog()) {
+        for (tool, descriptor) in tools(Role::Mono).into_iter().zip(catalog()) {
             let annotated = tool.annotations.and_then(|a| a.title);
             assert_eq!(tool.title.as_deref(), Some(descriptor.title));
             assert_eq!(annotated.as_deref(), Some(descriptor.title));
         }
-        let titled = |name: &str| tools().into_iter().find(|t| t.name == name)?.title;
+        let titled = |name: &str| {
+            tools(Role::Session)
+                .into_iter()
+                .find(|t| t.name == name)?
+                .title
+        };
         assert_eq!(titled("project_delete").as_deref(), Some("Remove project"));
         assert_eq!(titled("session_wait").as_deref(), Some("Wait for session"));
+    }
+
+    #[test]
+    fn only_a_monos_relay_lists_the_tools_only_a_mono_may_call() {
+        let names = |role| -> Vec<String> {
+            tools(role)
+                .into_iter()
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        let mono_only: Vec<_> = catalog()
+            .into_iter()
+            .filter(|d| d.mono_only)
+            .map(|d| d.name.to_owned())
+            .collect();
+        assert_eq!(mono_only.len(), 16);
+        let all: Vec<_> = catalog().into_iter().map(|d| d.name.to_owned()).collect();
+        assert_eq!(names(Role::Mono), all);
+        let session = names(Role::Session);
+        assert_eq!(session.len(), all.len() - mono_only.len());
+        assert!(session.iter().all(|name| !mono_only.contains(name)));
+        // Listed or not, a call reaches the app, which decides.
+        let call = command("mono_soul_read", None).unwrap();
+        assert!(call.command.mono_only());
     }
 }

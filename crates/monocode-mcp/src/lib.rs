@@ -19,6 +19,7 @@ mod backend;
 mod errors;
 pub mod http;
 mod identity;
+mod idle;
 mod launch;
 mod link;
 mod log;
@@ -32,11 +33,23 @@ pub use backend::{Backend, Connect};
 pub use launch::{ControlProbe, LAUNCH_WAIT, Launcher, Spawner};
 use monocode_control::{ControlError, Endpoint, SessionCredential};
 use rmcp::{RoleServer, ServiceExt, transport::IntoTransport};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 /// Decides what a caller is told when no app answers: `control_disabled`
 /// when the person turned control off, `app_not_running` otherwise.
 pub type UnavailableProbe = Arc<dyn Fn() -> ControlError + Send + Sync>;
+
+/// Which agent a session relay speaks for, as the app hints it in the
+/// session's environment (`MONOCODE_CONTROL_ROLE`). It decides only which
+/// tools the relay lists: the app decides what each caller may call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Role {
+    /// Any agent session, and every external client.
+    #[default]
+    Session,
+    /// A Mono's main chat or habit run: its own tools are listed too.
+    Mono,
+}
 
 /// How the relay finds and identifies itself to the app.
 #[derive(Clone)]
@@ -46,6 +59,8 @@ pub struct Options {
     unavailable: UnavailableProbe,
     launcher: Option<Launcher>,
     session: Option<SessionCredential>,
+    role: Role,
+    release_after: Duration,
 }
 
 impl Options {
@@ -59,6 +74,8 @@ impl Options {
             unavailable: Arc::new(ControlError::app_not_running),
             launcher: None,
             session: None,
+            role: Role::Session,
+            release_after: idle::RELEASE_AFTER,
         }
     }
     /// Speaks for the agent session `credential` names: the relay of a
@@ -68,6 +85,14 @@ impl Options {
     #[must_use]
     pub fn session(mut self, credential: Option<SessionCredential>) -> Self {
         self.session = credential;
+        self
+    }
+    /// Lists the tools `role` calls: a Mono's relay lists the operations
+    /// only a Mono may call as well. A hint only: the app still refuses them
+    /// to every other caller, and any relay passes any call on.
+    #[must_use]
+    pub fn role(mut self, role: Role) -> Self {
+        self.role = role;
         self
     }
     /// Calls as `name` instead of the MCP client's reported name.
@@ -87,6 +112,14 @@ impl Options {
     #[must_use]
     pub fn launcher(mut self, launcher: Launcher) -> Self {
         self.launcher = Some(launcher);
+        self
+    }
+    /// Hangs up a control connection that follows nothing once no call has
+    /// used it for `after` (a minute unless set), so the app's connection
+    /// slots stay free; the next call connects again.
+    #[must_use]
+    pub fn release_after(mut self, after: Duration) -> Self {
+        self.release_after = after;
         self
     }
 }

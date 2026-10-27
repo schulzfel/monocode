@@ -63,7 +63,7 @@ fn a_change_cut_off_mid_call_is_not_retryable_and_says_to_check_first() {
     let send = Command::SessionSend(SessionSendInput {
         session_id: 3,
         prompt: "Fix the tests".into(),
-        mode: None,
+        ..SessionSendInput::default()
     });
     let error = client.send(None, send).unwrap_err();
     assert_eq!(error.code, ErrorCode::Internal);

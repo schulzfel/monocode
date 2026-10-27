@@ -857,6 +857,8 @@ impl Shell {
         }
         self.sessions.remove(&id);
         self.session_summaries.remove(&id);
+        // Its relay's subscriptions end with it.
+        self.control_refuse_followers(cx);
         self.draft_sessions.remove(&id);
         self.history_recency.remove(&id);
         self.session_marks.remove(&id);

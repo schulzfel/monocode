@@ -1,7 +1,7 @@
 //! Session credentials for the control relay. Each session's token is a
-//! digest of a secret made once per app run and the session's id, as the
-//! Operator bridge derives its tokens: it lasts as long as the run, is never
-//! stored, and verifies in constant time.
+//! digest of a secret made once per app run and the session's id
+//! (`token::session_token`): it lasts as long as the run, is never stored,
+//! and verifies in constant time.
 use std::sync::OnceLock;
 
 /// This run's secret; a restarted app gives every session a new token.

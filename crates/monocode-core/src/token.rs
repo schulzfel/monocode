@@ -1,6 +1,6 @@
 //! Per-session tokens: each a digest of a secret made once per app run and
 //! the session's id, so it lasts as long as the run and is never stored. The
-//! Operator bridge and the control relay derive them so; every bridge checks
+//! control relay's session credentials are derived so; every check compares
 //! the one a caller sends in constant time.
 
 /// Session `session`'s token under `secret`: the hex SHA-256 of

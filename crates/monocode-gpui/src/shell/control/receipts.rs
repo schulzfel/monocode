@@ -107,7 +107,15 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let loaded = load.await;
             let _ = this.update_in(cx, |this, window, cx| match loaded {
-                Ok(None) => this.run_control(call, &grant, window, cx),
+                // The grant may have gone while the receipt was read
+                // (Operator authorized again here); a refusal keeps none.
+                Ok(None) => match this.control_grant(&call.caller, &call.command, cx) {
+                    Ok(grant) => this.run_control(call, &grant, window, cx),
+                    Err(error) => {
+                        this.control.pending.remove(&running);
+                        this.refuse_control(call, error, cx);
+                    }
+                },
                 Ok(Some((hash, outcome))) => {
                     this.control.pending.remove(&running);
                     let wire = serde_json::to_value(&call.command).unwrap_or_default();

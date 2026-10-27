@@ -124,6 +124,51 @@ impl Conversation {
         cx.emit(SessionChanged);
         cx.notify();
     }
+    /// Runs `action`, a message or draft from outside the composer, once the
+    /// history has loaded, loading it now; until then the chat has one
+    /// waiting (`external_waiting`).
+    pub(crate) fn defer_external(
+        &mut self,
+        action: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.external_waiting += 1;
+        self.defer_history_action(
+            move |this, cx| {
+                this.external_waiting -= 1;
+                action(this, cx);
+            },
+            cx,
+        );
+    }
+    /// Whether a message or draft from outside the composer waits for this
+    /// chat's history to load: the chat is as good as busy.
+    pub(crate) fn external_waiting(&self) -> bool {
+        self.external_waiting > 0
+    }
+    /// A control client's draft, saved as `/draft` saves one, once the
+    /// history has loaded; `done` hears what became of it. A draft of the
+    /// person's own, saved or in the composer, is kept, then and now.
+    pub(crate) fn control_draft(
+        &mut self,
+        text: String,
+        done: impl FnOnce(ExternalDraft) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.has_saved_draft() || self.has_unsent_composer(cx) {
+            return done(ExternalDraft::Kept);
+        }
+        if !self.idle_for_external(cx) {
+            return done(ExternalDraft::Busy);
+        }
+        if !self.history_ready() {
+            self.defer_external(move |this, cx| this.control_draft(text, done, cx), cx);
+            return;
+        }
+        self.save_app_draft(text, cx);
+        // Saving may still decline (`save_message_draft`).
+        done(ExternalDraft::Saved(self.has_saved_draft()));
+    }
     /// The last response handed to `target`, as the response's Hand off
     /// action builds it, once history is loaded.
     pub(crate) fn control_handoff(
@@ -177,6 +222,17 @@ impl Conversation {
             settings,
         })
     }
+}
+
+/// What became of a control client's draft (`control_draft`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExternalDraft {
+    /// Saved, or declined by the saving itself when `false`.
+    Saved(bool),
+    /// The chat has a draft of the person's, which stays.
+    Kept,
+    /// The chat is working or about to.
+    Busy,
 }
 
 /// The agent's prose after the last user message in `rows`.

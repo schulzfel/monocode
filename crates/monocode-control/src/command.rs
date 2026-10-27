@@ -94,6 +94,21 @@ macro_rules! registry {
                     $(Self::$variant(_) => <$op as Operation>::LOCAL_ONLY,)+
                 }
             }
+            /// Whether only a Mono's chat or habit run may make this call
+            /// ([`Operation::MONO_ONLY`]).
+            #[must_use]
+            pub fn mono_only(&self) -> bool {
+                match self {
+                    $(Self::$variant(_) => <$op as Operation>::MONO_ONLY,)+
+                }
+            }
+            /// The call's `project`, when an absent one means the current
+            /// project ([`Operation::project_slot`]).
+            pub fn project_slot(&mut self) -> Option<&mut Option<String>> {
+                match self {
+                    $(Self::$variant(input) => <$op as Operation>::project_slot(input),)+
+                }
+            }
         }
 
         $(
@@ -215,4 +230,20 @@ registry! {
     MonoList => ops::mono::MonoList,
     MonoOpen => ops::mono::MonoOpen,
     MonoSend => ops::mono::MonoSend,
+    MonoMemoryRead => ops::mono_memory::MonoMemoryRead,
+    MonoMemorySearch => ops::mono_memory::MonoMemorySearch,
+    MonoMemoryAdd => ops::mono_memory::MonoMemoryAdd,
+    MonoMemoryReplace => ops::mono_memory::MonoMemoryReplace,
+    MonoMemoryRemove => ops::mono_memory::MonoMemoryRemove,
+    MonoSoulRead => ops::mono_soul::MonoSoulRead,
+    MonoSoulUpdate => ops::mono_soul::MonoSoulUpdate,
+    MonoHabitList => ops::mono_habit::MonoHabitList,
+    MonoHabitAdd => ops::mono_habit::MonoHabitAdd,
+    MonoHabitUpdate => ops::mono_habit::MonoHabitUpdate,
+    MonoHabitRun => ops::mono_habit::MonoHabitRun,
+    MonoHabitRemove => ops::mono_habit::MonoHabitRemove,
+    MonoArtifactList => ops::mono_artifact::MonoArtifactList,
+    MonoArtifactRead => ops::mono_artifact::MonoArtifactRead,
+    MonoArtifactWrite => ops::mono_artifact::MonoArtifactWrite,
+    MonoCardPost => ops::mono_card::MonoCardPost,
 }

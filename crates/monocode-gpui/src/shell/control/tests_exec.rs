@@ -213,7 +213,7 @@ fn model_list_filters_caps_and_counts_omitted(cx: &mut TestAppContext) {
     let too_many = models(
         window,
         ModelListInput {
-            limit: Some(101),
+            limit: Some(1001),
             ..Default::default()
         },
         cx,

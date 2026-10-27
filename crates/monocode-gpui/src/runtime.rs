@@ -9,10 +9,13 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
-mod app_control;
+pub(crate) mod app_control;
 #[cfg(all(test, unix))]
 mod follow_up_tests;
 mod handoff;
+pub(crate) mod operator_prompt;
+#[cfg(all(test, unix))]
+mod operator_tests;
 mod persistence;
 pub(crate) mod remote;
 mod visual_discovery;
@@ -377,11 +380,25 @@ fn run_turn_using(
             && provider::native_prompt(kind, &prompt)
                 .trim_start()
                 .starts_with('/');
+        // MonoCode's control environment for this turn (`app_control`): its
+        // `app` command, and MonoCode's own MCP server where the provider
+        // takes one. What it gives decides what the Operator instructions
+        // and a Mono's context say this turn's agent can use.
+        let control = if !settings.text_only && !raw_native_command {
+            app_control::for_turn(&*locked(&store)?, summary.id, &summary.cwd, &settings)
+        } else {
+            std::collections::HashMap::new()
+        };
+        let access = monocode_core::app_mcp::Access::of(
+            kind,
+            &control,
+            app_control::unavailable(&summary.cwd, &settings),
+        );
         let prompt = if raw_native_command {
             prompt
         } else if let Some(mono) = &settings.mono {
             let files = monocode_core::mono::load_files(&mono.root, &mono.mono)?;
-            let added = monocode_core::mono::context(&mono.mono, &files, &mono.executable);
+            let added = monocode_core::mono::context(&mono.mono, &files, &mono.executable, access);
             let fingerprint = monocode_core::mono::files::content_hash(&added);
             mono_fingerprint = Some(fingerprint.clone());
             let rotated = provider_id.is_some() && context.ratio().is_some_and(|r| r >= 0.8);
@@ -470,18 +487,18 @@ fn run_turn_using(
         }
         if !raw_native_command && settings.operator_enabled {
             let cli = std::env::current_exe().map_err(|e| e.to_string())?;
-            prompt = format!(
-                "You have MonoCode app access for this project. Use the CLI: {} app ACTION --json JSON. Supported actions: models.list {{}}, sessions.list {{}}, sessions.read {{sessionId}}, sessions.start {{prompt,harness?,model?,title?,draft?,reveal?}}, sessions.send/draft {{sessionId,prompt}}, sessions.stop {{sessionId}}, folders.list {{}}, folders.move {{sessionId,folderId?,newFolderName?}}, notes.list {{}}, notes.read {{id}}, notes.write {{id?,title,body}}, worktrees.list {{}}. Scope is this thread's project. App credentials are in the environment; never print them. Respect the user’s request and selected access policy.\n\n{prompt}",
-                shlex_quote(&cli.to_string_lossy())
+            prompt = operator_prompt::wrap(
+                access,
+                &summary.cwd,
+                &shlex_quote(&cli.to_string_lossy()),
+                &prompt,
             );
         }
         // Every foreground session receives an independent visual capability,
-        // and MonoCode's own MCP server (`app_control`).
-        // This happens after configuration was persisted, and Settings' env is
-        // transport-only, so credentials never enter saved conversation settings.
+        // and the control environment computed above. This happens after
+        // configuration was persisted, and Settings' env is transport-only,
+        // so credentials never enter saved conversation settings.
         let visual_bridge = if !settings.text_only && !raw_native_command {
-            let control =
-                app_control::environment(&*locked(&store)?, summary.id, kind, &summary.cwd);
             settings.environment.extend(control);
             Some(monocode_core::visual_bridge::Server::start(summary.id)?)
         } else {

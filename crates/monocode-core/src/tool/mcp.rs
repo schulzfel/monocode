@@ -59,7 +59,7 @@ pub(crate) fn title(name: &str) -> String {
 /// Codex's `<server>:<tool>`, and ACP titles `<server>/<tool>` or
 /// `Tool: <server>/<tool>`. ACP agents title their own tools in prose with a
 /// semantic kind, so the short forms only count when there is no kind.
-fn identity<'a>(name: &'a str, kind: &str) -> Option<(&'a str, &'a str)> {
+pub(super) fn identity<'a>(name: &'a str, kind: &str) -> Option<(&'a str, &'a str)> {
     let name = name.trim();
     let (server, tool) = if let Some(rest) = name.strip_prefix("mcp__") {
         rest.split_once("__")?

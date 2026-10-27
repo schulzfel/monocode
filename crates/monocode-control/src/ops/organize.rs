@@ -78,19 +78,31 @@ fn archive_summary(output: &SessionArchiveOutput) -> String {
 #[derive(Debug)]
 pub struct SessionArchive;
 
+/// Which session, and whether to stop it first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionArchiveInput {
+    /// The session's id.
+    pub session_id: i64,
+    /// Stop its running turn and pause its queue first, so a working
+    /// session is archived too instead of refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<bool>,
+}
+
 impl Operation for SessionArchive {
     const NAME: &'static str = "session_archive";
     const TITLE: &'static str = "Archive session";
     const SUBJECT: &'static [&'static str] = &["sessionId"];
     const SCOPE: Scope = Scope::Manage;
-    const DESCRIPTION: &'static str = "Archive an idle session: its pane closes and it leaves the sidebar. A session that is working is refused with session_busy; stop it with session_stop first. Nothing is deleted; session_restore brings it back.";
+    const DESCRIPTION: &'static str = "Archive an idle session: its pane closes and it leaves the sidebar. A session that is working is refused with session_busy; stop it with session_stop first, or pass `stop` to stop it and archive it in one call. Nothing is deleted; session_restore brings it back.";
     const HINTS: Hints = Hints::DISCARD;
     const NOT_ON_SELF: bool = true;
     const LOCAL_ONLY: bool = true;
-    type Input = SessionInput;
+    type Input = SessionArchiveInput;
     type Output = SessionArchiveOutput;
 
-    fn target_session(input: &SessionInput) -> Option<i64> {
+    fn target_session(input: &SessionArchiveInput) -> Option<i64> {
         Some(input.session_id)
     }
 
@@ -127,7 +139,8 @@ impl Operation for SessionRestore {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectInput {
-    /// A local project's path or key; the current project when absent.
+    /// A local project's path or key; when absent, the calling agent
+    /// session's project, or for other clients the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
 }
@@ -169,6 +182,10 @@ impl Operation for FolderList {
     type Input = ProjectInput;
     type Output = FolderListOutput;
 
+    fn project_slot(input: &mut ProjectInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
+
     fn summary(output: &FolderListOutput) -> String {
         format!("{} folders in {}", output.folders.len(), output.project)
     }
@@ -178,8 +195,8 @@ impl Operation for FolderList {
 #[derive(Debug)]
 pub struct SessionMove;
 
-/// The session and where it goes: exactly one of `folderId` and
-/// `newFolderName`.
+/// The session and where it goes: exactly one of `folderId`,
+/// `newFolderName` and `removeFromFolder`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionMoveInput {
@@ -191,6 +208,9 @@ pub struct SessionMoveInput {
     /// A new folder to create for it (1 to 100 characters).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_folder_name: Option<String>,
+    /// Take it out of its folder instead; a folder left empty goes too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_from_folder: Option<bool>,
 }
 
 /// Where the session is now.
@@ -199,10 +219,12 @@ pub struct SessionMoveInput {
 pub struct SessionMoveOutput {
     /// The session's id.
     pub session_id: i64,
-    /// Its folder's id.
-    pub folder_id: String,
-    /// Its folder's name.
-    pub folder_name: String,
+    /// Its folder's id; absent once it was taken out of its folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
+    /// Its folder's name; absent once it was taken out of its folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_name: Option<String>,
 }
 
 impl Operation for SessionMove {
@@ -210,7 +232,7 @@ impl Operation for SessionMove {
     const TITLE: &'static str = "Move session";
     const SUBJECT: &'static [&'static str] = &["sessionId"];
     const SCOPE: Scope = Scope::Manage;
-    const DESCRIPTION: &'static str = "Move a session into a sidebar folder of its project: an existing one by folderId, or a new one named newFolderName. A new name creates another folder each time unless the call carries a requestId.";
+    const DESCRIPTION: &'static str = "Move a session into a sidebar folder of its project: an existing one by folderId, or a new one named newFolderName. removeFromFolder takes it out of its folder instead. A new name creates another folder each time unless the call carries a requestId.";
     const HINTS: Hints = Hints::CHANGE;
     const LOCAL_ONLY: bool = true;
     type Input = SessionMoveInput;
@@ -221,9 +243,9 @@ impl Operation for SessionMove {
     }
 
     fn summary(output: &SessionMoveOutput) -> String {
-        format!(
-            "Session {} is in “{}”",
-            output.session_id, output.folder_name
-        )
+        match &output.folder_name {
+            Some(name) => format!("Session {} is in “{name}”", output.session_id),
+            None => format!("Session {} is in no folder", output.session_id),
+        }
     }
 }

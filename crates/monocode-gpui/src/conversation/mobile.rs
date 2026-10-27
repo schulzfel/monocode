@@ -33,7 +33,7 @@ impl Conversation {
         cx: &mut Context<Self>,
     ) {
         if !self.history_ready() {
-            self.defer_history_action(
+            self.defer_external(
                 move |this, cx| this.submit_external(prompt, attachments, steer, cx),
                 cx,
             );

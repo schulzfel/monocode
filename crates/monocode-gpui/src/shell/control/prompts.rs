@@ -189,16 +189,18 @@ pub(super) fn question(client: &str, checked: &Checked) -> Question {
 }
 
 impl Shell {
-    /// Checks the target of confirmed `command`, and pins what it may act on.
+    /// Checks the target of `caller`'s confirmed `command`, and pins what it
+    /// may act on.
     pub(super) fn control_check(
         &mut self,
+        caller: &CallerKind,
         command: &Command,
         cx: &mut Context<Self>,
     ) -> gpui::Task<Result<Checked, ControlError>> {
         let ready = gpui::Task::ready;
         match command {
             Command::SessionDelete(input) => ready(
-                self.deletable_session(input.session_id, cx)
+                self.deletable_session(caller, input.session_id, cx)
                     .map(|title| Checked {
                         target: format!("session {}, “{title}”", input.session_id),
                         subject: Subject::Session { title },

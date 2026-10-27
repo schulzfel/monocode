@@ -1,6 +1,6 @@
 //! `session_rename`, `session_archive`, `session_restore`, `folder_list` and
 //! `session_move`, through the same paths as the sidebar, the phone and
-//! Operator's `folders.*`.
+//! Operator's `sessions.archive` and `folders.*`.
 use super::*;
 use crate::shell::session_admin::{FOLDER_CHOICE, move_to_folder};
 use monocode_control::ops::{
@@ -78,11 +78,51 @@ impl Shell {
         })))
     }
 
+    /// Stops session `id` and archives it, as Operator's `sessions.archive`
+    /// does, working or not: its turn stops and its queue pauses, the store
+    /// archives it, then its pane closes.
+    pub(super) fn control_session_stop_archive(
+        &mut self,
+        id: i64,
+        cx: &mut Context<Self>,
+    ) -> Result<Exec, ControlError> {
+        let view = self.control_view(id, cx)?;
+        view.update(cx, |view, cx| view.stop_app_session(cx));
+        let store = self.store.clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { locked(&store)?.set_archived(id, true) });
+        Ok(Exec::Later(cx.spawn(async move |this, cx| {
+            work.await.map_err(ControlError::internal)?;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(summary) = this.session_summaries.get_mut(&id) {
+                    summary.archived = true;
+                }
+                if let Some(view) = this.sessions.get(&id) {
+                    view.update(cx, |view, _| view.summary.archived = true);
+                }
+                this.refresh_session_mark(id, cx);
+                if this.workspace.tab_of(id).is_some() {
+                    this.close_pane(id, window, cx);
+                }
+                this.invalidate_chrome(cx);
+                cx.notify();
+            })
+            .map_err(|_| ControlError::internal("The window closed"))?;
+            output(&SessionArchiveOutput {
+                session_id: id,
+                archived: true,
+            })
+        })))
+    }
+
     pub(super) fn control_folder_list(
         &self,
         input: &ProjectInput,
+        caller: &CallerKind,
+        cx: &App,
     ) -> Result<FolderListOutput, ControlError> {
-        let project = self.control_project(input.project.as_deref())?;
+        let project = self.control_project_for(caller, input.project.as_deref(), cx)?;
         let folders = self
             .groups
             .get(&project)
@@ -116,20 +156,32 @@ impl Shell {
                 "newFolderName must be 1 to {MAX_FOLDER_NAME_CHARS} characters"
             )));
         }
+        let remove = input.remove_from_folder == Some(true);
+        if remove && (input.folder_id.is_some() || input.new_folder_name.is_some()) {
+            return Err(ControlError::invalid_input(
+                "Supply exactly one of folderId, newFolderName or removeFromFolder",
+            ));
+        }
         let project = self.session_metadata(id, cx).summary.cwd.clone();
         let mut groups = self.groups.get(&project).cloned().unwrap_or_default();
         let name = input.new_folder_name.map(|n| n.trim().to_owned());
-        let (folder, name) = match move_to_folder(&mut groups, id, input.folder_id, name) {
-            Ok(moved) => moved,
-            Err(error) => {
-                return Err(match error.as_str() {
-                    FOLDER_CHOICE => ControlError::invalid_input(error),
-                    "Folder not found" => ControlError::new(
-                        ErrorCode::NotFound,
-                        "There is no such folder in the session's project; see folder_list.",
-                    ),
-                    _ => ControlError::internal(error),
-                });
+        let (folder, name) = if remove {
+            // Out of its folder, as the sidebar's Remove from folder does.
+            groups.remove_sessions(&[id]);
+            (None, None)
+        } else {
+            match move_to_folder(&mut groups, id, input.folder_id, name) {
+                Ok((folder, name)) => (Some(folder), Some(name)),
+                Err(error) => {
+                    return Err(match error.as_str() {
+                        FOLDER_CHOICE => ControlError::invalid_input(error),
+                        "Folder not found" => ControlError::new(
+                            ErrorCode::NotFound,
+                            "There is no such folder in the session's project; see folder_list.",
+                        ),
+                        _ => ControlError::internal(error),
+                    });
+                }
             }
         };
         let store = self.store.clone();

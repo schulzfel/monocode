@@ -7,11 +7,11 @@ use monocode_control::{ControlError, Endpoint, POLICY_KEY, Policy};
 use std::{path::Path, sync::Arc};
 
 mod launch;
-mod session;
+pub(crate) mod session;
 #[cfg(test)]
 mod tests;
 
-const HELP: &str = "monocode-gpui mcp [--client NAME] [--dev-data | --monocode-data | --monocode-db PATH]\nServes MonoCode's MCP tools over standard input and output for an MCP client, relaying to the running app that uses the same data.\n--client NAME names this client in MonoCode's approval prompt instead of the MCP client's own name.\nThe data flags choose the data folder as for the app itself.\nInside MonoCode's own agent sessions, MonoCode sets MONOCODE_CONTROL_ENDPOINT, MONOCODE_CONTROL_SESSION and MONOCODE_CONTROL_TOKEN, and the relay speaks for that session.";
+const HELP: &str = "monocode-gpui mcp [--client NAME] [--dev-data | --monocode-data | --monocode-db PATH]\nServes MonoCode's MCP tools over standard input and output for an MCP client, relaying to the running app that uses the same data.\n--client NAME names this client in MonoCode's approval prompt instead of the MCP client's own name.\nThe data flags choose the data folder as for the app itself.\nInside MonoCode's own agent sessions, MonoCode sets MONOCODE_CONTROL_ENDPOINT, MONOCODE_CONTROL_SESSION and MONOCODE_CONTROL_TOKEN, and the relay speaks for that session; MONOCODE_CONTROL_ROLE=mono, set for a Mono's chat and habit runs, also lists the Mono's own tools.";
 
 /// Runs the relay until the MCP client disconnects; returns the exit code.
 pub(crate) fn run(args: &[String]) -> i32 {
@@ -54,10 +54,10 @@ pub(crate) fn run(args: &[String]) -> i32 {
     );
     // Inside one of MonoCode's sessions the environment names the endpoint
     // and the session; an app that does not answer then is not running.
-    let (endpoint, session) = match session::from_env(|key| std::env::var(key).ok()) {
-        None => (endpoint(&database), None),
-        Some(Ok((endpoint, credential))) => (Ok(endpoint), Some(credential)),
-        Some(Err(error)) => (Err(error), None),
+    let (endpoint, session, role) = match session::from_env(|key| std::env::var(key).ok()) {
+        None => (endpoint(&database), None, monocode_mcp::Role::Session),
+        Some(Ok(relay)) => (Ok(relay.endpoint), Some(relay.credential), relay.role),
+        Some(Err(error)) => (Err(error), None, monocode_mcp::Role::Session),
     };
     let when_unavailable: monocode_mcp::UnavailableProbe = if session.is_some() {
         Arc::new(ControlError::app_not_running)
@@ -67,6 +67,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
     let options = monocode_mcp::Options::new(endpoint)
         .client_name(client)
         .session(session)
+        .role(role)
         .launcher(launcher)
         .when_unavailable(when_unavailable);
     match monocode_mcp::run_stdio(options) {

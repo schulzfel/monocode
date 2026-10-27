@@ -322,7 +322,8 @@ pub struct AutomationUpsertInput {
     /// Its prompt (at most 240,000 bytes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    /// A local project's path or key; the current project when creating.
+    /// A local project's path or key; when creating without one, the
+    /// calling agent session's project, or for other clients the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// The provider, for example `claude` or `codex`.
@@ -367,6 +368,11 @@ impl Operation for AutomationUpsert {
     const HINTS: Hints = Hints::CHANGE;
     type Input = AutomationUpsertInput;
     type Output = AutomationUpsertOutput;
+
+    fn project_slot(input: &mut AutomationUpsertInput) -> Option<&mut Option<String>> {
+        // A new automation runs in the default project; a change keeps its own.
+        input.automation_id.is_none().then_some(&mut input.project)
+    }
 
     /// Creating one, setting its prompt or turning it on schedules a prompt.
     fn needs_also(input: &AutomationUpsertInput) -> bool {

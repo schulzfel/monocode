@@ -9,7 +9,6 @@ pub(super) struct ChatState {
     pub(super) delivered: std::collections::HashSet<String>,
     pub(super) sending: Option<String>,
     pub(super) failed: Vec<(String, String)>,
-    pub(super) external: Option<(String, bool)>,
     pub(super) floating: std::collections::HashSet<gpui::WindowId>,
     /// ModelPicker with `hideSettings`: the model list opens on its own.
     pub(super) models: Option<(Entity<ModelList>, Vec<Subscription>)>,
@@ -82,43 +81,6 @@ impl Conversation {
         });
         window.focus(&self.input.focus_handle(cx), cx);
     }
-    pub(crate) fn mono_external_pending(&self) -> bool {
-        self.mono_ui.external.is_some()
-    }
-    pub(crate) fn mono_external_send(
-        &mut self,
-        prompt: String,
-        draft: bool,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        if self.busy
-            || self.stopping
-            || self.mono_ui.external.is_some()
-            || !self.input.read(cx).content.trim().is_empty()
-        {
-            return Err("Session is busy or has an unsent draft".into());
-        }
-        self.mono_ui.external = Some((prompt, draft));
-        if self.history_ready() {
-            self.mono_flush_external(cx);
-        } else {
-            self.load(cx);
-        }
-        cx.emit(SessionChanged);
-        Ok(())
-    }
-    pub(super) fn mono_flush_external(&mut self, cx: &mut Context<Self>) {
-        if !self.history_ready() || self.stopping {
-            return;
-        }
-        if let Some((prompt, draft)) = self.mono_ui.external.take() {
-            if draft {
-                self.input.update(cx, |i, cx| i.set_text(prompt, cx));
-            } else {
-                self.install_transfer(self.settings.clone(), Some(prompt), cx);
-            }
-        }
-    }
     pub(crate) fn mono_attention(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         div()
             .child(self.approval_shelf(window, cx))
@@ -127,19 +89,15 @@ impl Conversation {
             })
             .into_any_element()
     }
-    pub(crate) fn configure_mono(
-        &mut self,
-        mono: Mono,
-        root: PathBuf,
-        environment: std::collections::HashMap<String, String>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn configure_mono(&mut self, mono: Mono, root: PathBuf, cx: &mut Context<Self>) {
         self.input
             .update(cx, |input, cx| input.mono_composer(&mono.label(), cx));
         let name = mono.label();
         self.transcript
             .update(cx, |t, _| t.mono_mode(&mono.mascot, mono.color, &name));
-        self.settings.environment = environment;
+        // Its turns get the control environment (`runtime::app_control`);
+        // the chat keeps none of its own.
+        self.settings.environment.clear();
         self.mono_ui.pending = mono.outbox.clone();
         self.mono_ui
             .delivered

@@ -1,5 +1,6 @@
-//! Shared project actions for ordinary Operator threads and resident Monos.
-//! Visibility and Mono-only capabilities belong to the caller, not launch JSON.
+//! What agent sessions' and Monos' MonoCode calls share: launch settings and
+//! checkouts, model discovery, conversation pages and notes. Visibility and
+//! Mono-only capabilities belong to the caller, not launch JSON.
 use crate::{
     agent::{AccessMode, Settings},
     catalog::{Model, ModelControl},
@@ -12,38 +13,7 @@ mod notes;
 #[cfg(test)]
 mod tests;
 
-pub use notes::{
-    list_notes, notes_action, notes_action_for, read_note, write_note, NoteError, NoteWrite,
-};
-
-pub fn validate_operator(action: &str, input: &Value) -> Result<(), String> {
-    if !matches!(
-        action,
-        "models.list"
-            | "sessions.list"
-            | "sessions.read"
-            | "sessions.start"
-            | "sessions.send"
-            | "sessions.draft"
-            | "sessions.stop"
-            | "sessions.archive"
-            | "sessions.delete"
-            | "folders.list"
-            | "folders.move"
-            | "notes.list"
-            | "notes.read"
-            | "notes.write"
-            | "worktrees.list"
-            | "worktrees.create"
-    ) {
-        return Err("Unknown Operator action. Run app help for project actions; memory, habits and artifacts require a Mono.".into());
-    }
-    crate::mono::api::validate(action, input)?;
-    if input["notifyOnComplete"] == true {
-        return Err("Completion notifications are only available in a Mono's chat".into());
-    }
-    Ok(())
-}
+pub use notes::{list_notes, read_note, write_note, NoteError, NoteWrite};
 
 pub fn text(input: &Value, key: &str, max: usize) -> Result<String, String> {
     input
@@ -66,13 +36,6 @@ pub fn prompt(input: &Value) -> Result<String, String> {
 pub fn fingerprint(action: &str, input: &Value) -> String {
     crate::mono::files::content_hash(&format!("{action}:{input}"))
 }
-pub fn receipt_key(caller: i64, request: &str) -> String {
-    format!(
-        "operator-app-receipt:{caller}:{}",
-        crate::mono::files::content_hash(request)
-    )
-}
-
 /// Advertise precisely the IDs and values accepted by launch_settings.
 pub fn model_controls(kind: Kind, model: &Model) -> Vec<ModelControl> {
     let mut controls = model.controls.clone();
@@ -158,7 +121,11 @@ pub fn launch_settings(
     kind: Kind,
     models: &[Model],
 ) -> Result<Settings, String> {
-    crate::mono::api::validate("sessions.start", input)?;
+    if input.get("besideSessionId").is_some()
+        && !matches!(input["placement"].as_str(), Some("right" | "down"))
+    {
+        return Err("besideSessionId requires placement right or down".into());
+    }
     let requested =
         optional_text(input, "model", 512)?.and_then(|m| crate::store::native_model(&m, kind.id()));
     let changing = source_provider != kind.id()

@@ -105,7 +105,8 @@ pub struct SearchProject;
 pub struct SearchProjectInput {
     /// The text or pattern to find (1 to 200 characters).
     pub query: String,
-    /// A local project's path or key; the current project when absent.
+    /// A local project's path or key; when absent, the calling agent
+    /// session's project, or for other clients the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// Match case.
@@ -165,6 +166,10 @@ impl Operation for SearchProject {
     const HINTS: Hints = Hints::READ;
     type Input = SearchProjectInput;
     type Output = SearchProjectOutput;
+
+    fn project_slot(input: &mut SearchProjectInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
 
     fn summary(output: &SearchProjectOutput) -> String {
         format!(

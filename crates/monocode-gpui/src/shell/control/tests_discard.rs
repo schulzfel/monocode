@@ -22,7 +22,7 @@ fn ask(window: WindowHandle<Shell>, command: Command, cx: &mut TestAppContext) -
             let request = Request::Call {
                 caller: CLIENT.into(),
                 request_id: None,
-                command,
+                command: Box::new(command),
                 reply,
             };
             shell.handle_control(request, window, cx);

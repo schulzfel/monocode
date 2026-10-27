@@ -161,11 +161,13 @@ async fn tools_list_publishes_the_catalog_with_schemas_and_annotations() {
         assert!(instructions.contains("session_start") && instructions.contains("session_wait"));
         let tools = session.peer().list_all_tools().await.unwrap();
         let names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
-        let mut catalog_names: Vec<_> = catalog().iter().map(|d| d.name).collect();
+        // An external client never gets the tools only a Mono may call.
+        let listed: Vec<_> = catalog().into_iter().filter(|d| !d.mono_only).collect();
+        let mut catalog_names: Vec<_> = listed.iter().map(|d| d.name).collect();
         catalog_names.push("app_launch");
         assert_eq!(names, catalog_names, "{version}");
         assert_eq!(names.len(), 66, "65 catalog tools, then app_launch");
-        for (tool, descriptor) in tools.iter().zip(catalog()) {
+        for (tool, descriptor) in tools.iter().zip(listed) {
             assert_eq!(*tool.input_schema, descriptor.input_schema);
             assert_eq!(
                 tool.output_schema.as_deref(),

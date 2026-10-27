@@ -5,6 +5,8 @@ mod drafts;
 #[cfg(test)]
 mod follow_tests;
 mod history;
+#[cfg(test)]
+mod launch_tests;
 pub(crate) use history::{HistoryPager, PreparedHistory};
 mod links;
 mod live_phase;
@@ -1573,7 +1575,8 @@ impl TranscriptView {
                 .iter()
                 .any(|r| r.first && matches!(r.role.as_str(), "tool" | "reasoning"))
     }
-    /// monoSpawnedSessions: sessions a run's `sessions.start` calls accepted.
+    /// monoSpawnedSessions: sessions a run's `session_start` calls accepted,
+    /// through the CLI or the MCP server (`mono::work::session_call`).
     fn run_launches(&self, turn: usize, end: usize) -> Vec<i64> {
         let mut found = Vec::new();
         let mut at = turn;
@@ -1592,40 +1595,11 @@ impl TranscriptView {
                     .map(|r| r.text.as_str())
                     .collect();
                 if let Ok(tool) = serde_json::from_str::<ToolCall>(&text)
-                    && tool.state == ToolState::Completed
-                    && let Ok(input) = serde_json::from_str::<serde_json::Value>(&tool.input)
-                    && let Some(action) = input["command"]
-                        .as_str()
-                        .and_then(monocode_core::mono::work::command_action)
-                    && matches!(action.as_str(), "sessions.start" | "sessions.send")
+                    && let Some((call, ids)) = monocode_core::mono::work::session_call(&tool)
                 {
-                    let receipts = serde_json::from_str::<serde_json::Value>(&tool.output)
-                        .map(|v| vec![v])
-                        .unwrap_or_else(|_| {
-                            tool.output
-                                .lines()
-                                .filter_map(|line| serde_json::from_str(line.trim()).ok())
-                                .collect()
-                        });
-                    for value in receipts {
-                        if value["ok"] == true
-                            && let Some(id) = value["result"]["sessionId"]
-                                .as_i64()
-                                .or_else(|| {
-                                    monocode_core::mono::work::session_handle(
-                                        &value["result"]["id"],
-                                    )
-                                })
-                                .or_else(|| {
-                                    (value["result"]["submitted"] == true)
-                                        .then(|| {
-                                            monocode_core::mono::work::session_handle(
-                                                &value["result"]["sessionId"],
-                                            )
-                                        })
-                                        .flatten()
-                                })
-                            && (action == "sessions.start" || self.launches.contains_key(&id))
+                    for id in ids {
+                        if (call == monocode_core::mono::work::SessionCall::Start
+                            || self.launches.contains_key(&id))
                             && !found.contains(&id)
                         {
                             found.push(id);

@@ -30,12 +30,7 @@ fn mono_messages_steer_the_ready_provider_once_and_keep_their_send_time(cx: &mut
     window
         .update(cx, |view, _, cx| {
             view.summary.provider = "codex".into();
-            view.configure_mono(
-                monocode_core::mono::Mono::default(),
-                "/tmp".into(),
-                Default::default(),
-                cx,
-            );
+            view.configure_mono(monocode_core::mono::Mono::default(), "/tmp".into(), cx);
             view.busy = true;
             view.controls = Some(send);
             let message = monocode_core::mono::Message {

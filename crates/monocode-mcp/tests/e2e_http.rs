@@ -249,6 +249,16 @@ async fn both_protocol_versions_list_call_and_follow_over_http() {
         let (session, mut updates) = connect(url.clone(), version.clone(), name).await;
         let tools = session.peer().list_all_tools().await.unwrap();
         assert!(tools.iter().any(|t| t.name == "project_list"));
+        let mono_only = monocode_control::catalog()
+            .into_iter()
+            .filter(|d| d.mono_only);
+        for descriptor in mono_only {
+            assert!(
+                !tools.iter().any(|t| t.name == descriptor.name),
+                "HTTP clients never get {}, which only a Mono may call",
+                descriptor.name
+            );
+        }
         assert!(
             !tools.iter().any(|t| t.name == "app_launch"),
             "the app serving HTTP is running: nothing to launch"

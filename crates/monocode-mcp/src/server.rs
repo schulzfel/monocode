@@ -1,7 +1,7 @@
 //! The `rmcp` server handler: capabilities, instructions, tools, read-only
 //! resources and their change subscriptions on both protocol versions.
 use crate::{
-    Options,
+    Options, Role,
     backend::Connect,
     errors, identity, launch,
     link::Link,
@@ -27,7 +27,7 @@ pub(crate) const INSTRUCTIONS: &str = "MonoCode is a desktop app that runs codin
 
 /// The instructions of a relay that speaks for an agent session the app
 /// runs itself.
-pub(crate) const SESSION_INSTRUCTIONS: &str = "You are running inside MonoCode, the desktop app that runs this coding agent session in one of its projects, tabs and panes. These tools see and drive that running app; changes appear in its window as if the person made them. Projects, tabs, panes, sessions, notes, worktrees, automations, settings and the rest of MonoCode's state are managed through these tools only: when the person asks for something in MonoCode (for example \"add ~/code/app to MonoCode\" is project_add, \"open a new session for this\" is session_start), call the tool, and never read or edit MonoCode's database, settings or data files directly. This session holds every scope. Whether a call runs is decided by your own permission mode, as for any other tool; MonoCode asks no confirmation of its own. A session cannot stop, archive, delete, reconfigure or wait on itself. Failures are tool results with {code, message, retryable}: invalid_input names what to change, not_found means the target is gone.";
+pub(crate) const SESSION_INSTRUCTIONS: &str = "You are running inside MonoCode, the desktop app that runs this coding agent session in one of its projects, tabs and panes. These tools see and drive that running app; changes appear in its window as if the person made them. Projects, tabs, panes, sessions, notes, worktrees, automations, settings and the rest of MonoCode's state are managed through these tools only: when the person asks for something in MonoCode (for example \"add ~/code/app to MonoCode\" is project_add, \"open a new session for this\" is session_start), call the tool, and never read or edit MonoCode's database, settings or data files directly. This session holds every scope. Whether a call runs is decided by your own permission mode, as for any other tool; MonoCode asks no confirmation of its own. In plan or read-only mode, MonoCode tools that change something are refused. A session cannot send to, draft in, stop, archive, delete, reconfigure or wait on itself. Failures are tool results with {code, message, retryable}: invalid_input names what to change, not_found means the target is gone.";
 
 /// How long a client may cache the tool list: it changes only with the app.
 const TOOLS_TTL_MS: u64 = 5 * 60 * 1000;
@@ -60,7 +60,8 @@ impl Relay {
     fn new(connect: &Connect, stdio: Option<Options>) -> Self {
         let inbox = Arc::new(Inbox::default());
         let link = Arc::new(Link::new(connect(inbox.sink())));
-        let mut tools = tools::tools();
+        let role = stdio.as_ref().map_or(Role::Session, |o| o.role);
+        let mut tools = tools::tools(role);
         if stdio.is_some() {
             tools.push(launch::tool());
         }

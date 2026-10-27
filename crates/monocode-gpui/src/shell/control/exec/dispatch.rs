@@ -1,9 +1,13 @@
 //! `session_start`, `session_send`, `session_wait` and `session_stop`.
 //! Starting reuses Operator's launch pipeline with the client as origin, so
-//! launched sessions never get Operator, plan or control capability.
-use super::session::{access_or_default, remote_unsupported};
+//! launched sessions never get Operator, plan or control capability. An
+//! agent session starts sessions as Operator's threads do: from its own
+//! live settings, beside its own pane. A Mono starts them as its old app
+//! actions did: from its main chat, recorded among its launches and kept
+//! out of the sidebar, with a completion report unless it only drafts.
+use super::session::{access_or_default, no_session, remote_unsupported};
 use super::*;
-use crate::shell::session_launch::{Launch, launch_session};
+use crate::shell::session_launch::{Launch, NewChat, Origin, launch_session};
 use monocode_control::{
     AccessMode,
     ops::dispatch::{
@@ -12,6 +16,7 @@ use monocode_control::{
         SessionStopOutput, SessionWaitInput, SessionWaitOutput, WorkspaceMode,
     },
 };
+use monocode_core::agent::Settings;
 use monocode_core::app_access as app;
 use serde_json::json;
 
@@ -24,6 +29,23 @@ pub(super) fn prompt(text: &str) -> Result<String, ControlError> {
         )));
     }
     app::prompt(&json!({ "prompt": text })).map_err(ControlError::invalid_input)
+}
+
+/// Only a Mono's chat hears back when a session it started or messaged is
+/// done.
+const MONO_NOTIFY: &str = "Completion notifications are only available in a Mono's chat";
+/// A draft is never sent, so it never completes.
+const DRAFT_NOTIFY: &str = "An unsent draft cannot send a completion notification";
+/// `session_send` with `ifIdle` into a session that is not ready, in
+/// Operator's words.
+const NOT_IDLE: &str = "Session is busy, loading, or has an unsent draft. Its draft was preserved.";
+
+/// Where a launch's settings come from.
+enum Start {
+    /// An agent session's live settings.
+    Inherited(Box<Settings>),
+    /// A new chat's defaults, read from the store on the worker.
+    New(NewChat),
 }
 
 fn launch_error(error: String) -> ControlError {
@@ -73,6 +95,9 @@ fn options(input: &SessionStartInput, prompt: &str, access: AccessMode) -> Value
     if let Some(id) = input.beside_session_id {
         set("besideSessionId", json!(id));
     }
+    if let Some(title) = &input.title {
+        set("title", json!(title));
+    }
     options
 }
 
@@ -83,31 +108,78 @@ impl Shell {
         caller: &Caller,
         cx: &mut Context<Self>,
     ) -> Result<Exec, ControlError> {
+        let draft = input.draft.unwrap_or(false);
+        let mono = match caller.caller {
+            CallerKind::Mono { .. } => true,
+            CallerKind::Session(_) | CallerKind::External(_) => false,
+        };
+        if input.notify_on_complete == Some(true) && (draft || !mono) {
+            let refusal = if draft { DRAFT_NOTIFY } else { MONO_NOTIFY };
+            return Err(ControlError::invalid_input(refusal));
+        }
+        // A Mono hears back from what it starts unless it only drafts (MO-21).
+        let notify = input.notify_on_complete.unwrap_or(!draft);
         let prompt = prompt(&input.prompt)?;
-        let project = self.control_local_project(input.project.as_deref())?;
-        let kind = match &input.harness {
-            Some(id) => Kind::parse(id).ok_or_else(|| {
+        let project =
+            self.control_local_project_for(caller.caller, input.project.as_deref(), cx)?;
+        let harness = match &input.harness {
+            Some(id) => Some(Kind::parse(id).ok_or_else(|| {
                 ControlError::invalid_input(format!(
                     "There is no harness {id}; see model_list for the providers."
                 ))
-            })?,
-            None => self.default_kind_for(&project),
+            })?),
+            None => None,
         };
-        let mut new_chat = self.new_chat(kind, &project, cx);
-        new_chat.access = access_or_default(input.access, cx);
-        let options = options(input, &prompt, new_chat.access.into());
-        let focused = self
-            .workspace
-            .active
-            .filter(|id| self.session_summaries.contains_key(id))
-            .filter(|id| self.session_metadata(*id, cx).summary.cwd == project);
-        let placement = self
-            .app_placement(&options, focused, &project, cx)
-            .map_err(ControlError::invalid_input)?;
+        // An agent session's launch inherits its settings and access and goes
+        // beside its pane; a Mono's inherits its main chat's (or its habit
+        // run's), beside its chat, which is never a pane; a client's starts
+        // as a new chat, beside the focus.
+        let (kind, source_provider, start, access, beside) = match caller.caller {
+            CallerKind::Session(id) => {
+                let source = self
+                    .session_source(*id, harness, &project, cx)
+                    .ok_or_else(|| no_session(*id))?;
+                let access = input
+                    .access
+                    .unwrap_or_else(|| source.settings.access.into());
+                let start = Start::Inherited(Box::new(source.settings));
+                (source.kind, source.provider, start, access, Some(*id))
+            }
+            CallerKind::Mono { session, mono, .. } => {
+                let source = self.mono_source(*session, mono, harness, &project, cx);
+                let access = input
+                    .access
+                    .unwrap_or_else(|| source.settings.access.into());
+                let start = Start::Inherited(Box::new(source.settings));
+                (source.kind, source.provider, start, access, Some(*session))
+            }
+            CallerKind::External(_) => {
+                let kind = harness.unwrap_or_else(|| self.default_kind_for(&project));
+                let mut new_chat = self.new_chat(kind, &project, cx);
+                new_chat.access = access_or_default(input.access, cx);
+                let access = new_chat.access.into();
+                let focused = self.control_focused_pane(&project, None, cx);
+                (
+                    kind,
+                    kind.id().into(),
+                    Start::New(new_chat),
+                    access,
+                    focused,
+                )
+            }
+        };
+        let options = options(input, &prompt, access);
+        let placement = self.control_placement(
+            input.placement,
+            input.beside_session_id,
+            beside,
+            &project,
+            cx,
+        )?;
         let request = caller.request_key();
         let origin = caller.caller.origin();
-        let draft = input.draft.unwrap_or(false);
         let reveal = input.reveal.unwrap_or(false);
+        let monos = self.monos.clone();
         let store = self.store.clone();
         let launch = {
             let origin = origin.clone();
@@ -116,7 +188,7 @@ impl Shell {
                 fingerprint: app::fingerprint("session_start", &options),
                 project,
                 kind,
-                source_provider: kind.id().into(),
+                source_provider,
                 settings,
                 input: options,
                 prompt,
@@ -125,7 +197,10 @@ impl Shell {
             }
         };
         let work = cx.background_executor().spawn(async move {
-            let settings = new_chat.settings(&*locked(&store)?);
+            let settings = match start {
+                Start::Inherited(settings) => *settings,
+                Start::New(new_chat) => new_chat.settings(&*locked(&store)?),
+            };
             launch_session(&store, launch(settings))
         });
         Ok(Exec::Later(cx.spawn(async move |this, cx| {
@@ -142,11 +217,44 @@ impl Shell {
                 submitted: !draft,
                 draft,
             };
-            if launched.fresh {
-                this.update_in(cx, |this, window, cx| {
-                    this.install_launch(launched, origin, (draft, reveal), placement, window, cx);
-                })
-                .map_err(|_| ControlError::internal("The window closed"))?;
+            let closed = |_| ControlError::internal("The window closed");
+            match (launched.fresh, origin, monos) {
+                // A repeat finds the session its first call installed.
+                (false, ..) => {}
+                // The Mono records and installs it, updating the window itself.
+                (true, Origin::Mono { caller, mono }, Some(monos)) => {
+                    let launched = crate::monos::control::Launched {
+                        mono,
+                        caller,
+                        summary: launched.summary,
+                        settings: launched.settings,
+                        draft,
+                        notify,
+                        reveal,
+                        placement,
+                    };
+                    let handle = this
+                        .update_in(cx, |_, window, _| window.window_handle())
+                        .map_err(closed)?;
+                    handle
+                        .update(cx, |_, window, cx| {
+                            monos.update(cx, |m, cx| m.control_launched(launched, window, cx));
+                        })
+                        .map_err(closed)?;
+                }
+                (true, origin, _) => {
+                    this.update_in(cx, |this, window, cx| {
+                        this.install_launch(
+                            launched,
+                            origin,
+                            (draft, reveal),
+                            placement,
+                            window,
+                            cx,
+                        );
+                    })
+                    .map_err(closed)?;
+                }
             }
             output(&out)
         })))
@@ -155,10 +263,32 @@ impl Shell {
     pub(super) fn control_session_send(
         &mut self,
         input: SessionSendInput,
+        caller: &CallerKind,
         cx: &mut Context<Self>,
     ) -> Result<SessionSendOutput, ControlError> {
-        let prompt = prompt(&input.prompt)?;
+        let notify = input.notify_on_complete == Some(true);
+        let mono = match caller {
+            CallerKind::Mono { session, mono, .. } => Some((*session, mono.clone())),
+            CallerKind::Session(_) | CallerKind::External(_) => None,
+        };
+        if notify && mono.is_none() {
+            return Err(ControlError::invalid_input(MONO_NOTIFY));
+        }
         let id = input.session_id;
+        if input.if_idle == Some(true) {
+            // The old send: only into an idle chat with an empty composer,
+            // which a chat that is not loaded yet gets once it has loaded
+            // (`submit_external`). A session's also needs the saved draft
+            // empty, so the person's draft stays theirs; a Mono's never
+            // looked at it.
+            let busy = self.session_metadata(id, cx).busy;
+            let view = self.control_view(id, cx)?;
+            let view = view.read(cx);
+            if busy || !view.idle_for_external(cx) || (mono.is_none() && view.has_saved_draft()) {
+                return Err(ControlError::new(ErrorCode::SessionBusy, NOT_IDLE));
+            }
+        }
+        let prompt = prompt(&input.prompt)?;
         let steer = input.mode == Some(SendMode::Steer);
         let kind = Kind::from_id(&self.session_metadata(id, cx).summary.provider);
         if steer && !kind.can_steer() {
@@ -178,6 +308,21 @@ impl Shell {
             };
             (delivery, view.queue_length())
         });
+        // A Mono that asks to hear back gets a report once the session is
+        // done, as for a session it started.
+        if let (Some((caller, mono)), true, Some(monos)) = (mono, notify, self.monos.clone()) {
+            let view = view.read(cx);
+            let messaged = crate::monos::control::Messaged {
+                mono,
+                caller,
+                session: id,
+                cwd: view.summary.cwd.clone(),
+                title: view.summary.title.clone(),
+                harness: view.summary.provider.clone(),
+                model: view.mono_model(),
+            };
+            monos.update(cx, |m, cx| m.control_rearm(messaged, cx));
+        }
         Ok(SessionSendOutput {
             session_id: id,
             delivery,
@@ -191,9 +336,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Result<SessionStopOutput, ControlError> {
         let was_busy = self.session_metadata(id, cx).busy;
-        if let Some(view) = self.sessions.get(&id).cloned() {
-            view.update(cx, |view, cx| view.stop_app_session(cx));
-        }
+        // As the old stop did, a chat that is not loaded is loaded to stop
+        // it, so its saved queue is paused before it would run.
+        let view = self.control_view(id, cx)?;
+        view.update(cx, |view, cx| view.stop_app_session(cx));
         Ok(SessionStopOutput {
             session_id: id,
             was_busy,
@@ -204,6 +350,7 @@ impl Shell {
     pub(super) fn control_session_wait(
         &mut self,
         input: &SessionWaitInput,
+        caller: &CallerKind,
         cx: &mut Context<Self>,
     ) -> Result<Exec, ControlError> {
         let id = input.session_id;
@@ -213,12 +360,12 @@ impl Shell {
                 "timeoutMs must be at most {MAX_WAIT_MS}; call again to keep waiting."
             )));
         }
-        self.control_session(id, cx)?;
+        self.control_readable_for(caller, id, cx)?;
         let Some(view) = self.sessions.get(&id).cloned() else {
             return self.control_wait_unloaded(id, cx);
         };
         if timeout == 0 || view.read(cx).control_settled() {
-            return ready(self.control_waited(id, true, cx));
+            return ready(self.control_waited(id, true, caller, cx));
         }
         // Whichever comes first: the chat settling, or the time running out.
         let (done, finished) = async_channel::bounded::<bool>(2);
@@ -235,12 +382,15 @@ impl Shell {
             timer.await;
             let _ = done.try_send(true);
         });
+        let caller = caller.clone();
         Ok(Exec::Later(cx.spawn(async move |this, cx| {
             let timed_out = finished.recv().await.unwrap_or(true);
             drop((watch, clock));
-            this.update(cx, |this, cx| this.control_waited(id, timed_out, cx))
-                .map_err(|_| ControlError::internal("The window closed"))?
-                .and_then(|o| output(&o))
+            this.update(cx, |this, cx| {
+                this.control_waited(id, timed_out, &caller, cx)
+            })
+            .map_err(|_| ControlError::internal("The window closed"))?
+            .and_then(|o| output(&o))
         })))
     }
 
@@ -250,9 +400,10 @@ impl Shell {
         &self,
         id: i64,
         timed_out: bool,
+        caller: &CallerKind,
         cx: &App,
     ) -> Result<SessionWaitOutput, ControlError> {
-        self.control_session(id, cx)?;
+        self.control_readable_for(caller, id, cx)?;
         let view = self.sessions.get(&id).map(|v| v.read(cx));
         Ok(SessionWaitOutput {
             session_id: id,

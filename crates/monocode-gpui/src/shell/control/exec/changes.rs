@@ -106,18 +106,20 @@ impl Shell {
     pub(super) fn control_changes_read(
         &self,
         input: &ChangesReadInput,
+        caller: &CallerKind,
         cx: &App,
     ) -> Result<Exec, ControlError> {
         let limit = ops::limit(input.limit, DEFAULT_CHANGED_FILES, MAX_CHANGED_FILES)?;
         match (input.project.as_deref(), input.session_id) {
             (Some(project), None) => {
-                let root = self.control_local_project(Some(project))?;
+                let root = self.control_local_project_for(caller, Some(project), cx)?;
                 Ok(Exec::Later(cx.background_executor().spawn(async move {
                     output(&project_changes(&root, limit)?)
                 })))
             }
             (None, Some(id)) => {
-                self.control_local_session(id, cx)?;
+                self.control_readable_for(caller, id, cx)?;
+                self.control_local_cwd(id, cx)?;
                 // The review's folder: the session's worktree once it has one.
                 let cwd = self.sessions.get(&id).map_or_else(
                     || self.session_metadata(id, cx).summary.cwd.clone(),

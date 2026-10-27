@@ -41,11 +41,13 @@ fn changing_tools_accept_a_request_id_and_reads_do_not() {
             "harness",
             "model",
             "modelSettings",
+            "notifyOnComplete",
             "placement",
             "project",
             "prompt",
             "requestId",
             "reveal",
+            "title",
             "workspaceMode",
             "worktreeBase",
             "worktreeCwd"

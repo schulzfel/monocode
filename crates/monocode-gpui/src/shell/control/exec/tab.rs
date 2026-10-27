@@ -3,12 +3,8 @@
 use super::session::remote_unsupported;
 use super::workspace::tab_id;
 use super::*;
-use monocode_control::ops::{
-    dispatch::Placement,
-    tab::{AppView, TabCloseOutput, TabOpenInput, TabOutput, TabTarget},
-};
+use monocode_control::ops::tab::{AppView, TabCloseOutput, TabOpenInput, TabOutput, TabTarget};
 use monocode_core::files::path_key;
-use serde_json::json;
 
 impl Shell {
     /// What the window shows now.
@@ -70,26 +66,17 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Result<(), ControlError> {
         let project = self.session_metadata(id, cx).summary.cwd.clone();
-        let mut options = json!({});
-        if let Some(placement) = input.placement {
-            options["placement"] = json!(match placement {
-                Placement::Tab => "tab",
-                Placement::Right => "right",
-                Placement::Down => "down",
-            });
-        }
         if let Some(beside) = input.beside_session_id {
             self.control_local_session(beside, cx)?;
-            options["besideSessionId"] = json!(beside);
         }
-        let focused = self
-            .workspace
-            .active
-            .filter(|pane| *pane != id && self.session_summaries.contains_key(pane))
-            .filter(|pane| self.session_metadata(*pane, cx).summary.cwd == project);
-        let placement = self
-            .app_placement(&options, focused, &project, cx)
-            .map_err(ControlError::invalid_input)?;
+        let focused = self.control_focused_pane(&project, Some(id), cx);
+        let placement = self.control_placement(
+            input.placement,
+            input.beside_session_id,
+            focused,
+            &project,
+            cx,
+        )?;
         if placement.is_some_and(|(beside, _)| beside == id) {
             return Err(ControlError::invalid_input(
                 "besideSessionId must be another session's pane.",

@@ -5,6 +5,9 @@
 
 mod accounts;
 mod activity;
+// Only tests translate old actions until the `app` command runs on the
+// control pipeline.
+mod app_cli;
 mod app_menu;
 mod arcade;
 mod assets;
@@ -36,6 +39,7 @@ mod history;
 mod image_lightbox;
 mod image_memory;
 mod inbox;
+mod inherited_env;
 mod input;
 mod markdown;
 mod markdown_model;
@@ -59,6 +63,8 @@ mod project_search;
 mod project_settings;
 mod project_tabs;
 mod pulse;
+#[cfg(debug_assertions)]
+mod qa_hook;
 mod questions;
 mod quick_composer;
 mod quick_open;
@@ -105,6 +111,16 @@ use std::{
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 actions!(application, [Quit]);
+/// Whether the debug-only QA hook runs this launch: the app then neither
+/// activates itself nor focuses its window.
+#[cfg(debug_assertions)]
+fn qa_hook_requested() -> bool {
+    qa_hook::requested()
+}
+#[cfg(not(debug_assertions))]
+fn qa_hook_requested() -> bool {
+    false
+}
 fn quit(cx: &mut App) {
     if notifications::updater::defer_quit(cx) {
         return;
@@ -206,21 +222,12 @@ fn main() {
         }
         return;
     }
+    // Before any GUI initialization, so an agent's call never opens a window.
     if cli_args.first().is_some_and(|a| a == "app") {
-        match monocode_core::mono::bridge::client(&cli_args[1..]) {
-            Ok(value) => {
-                println!("{value}");
-                if value.get("ok") == Some(&serde_json::Value::Bool(false)) {
-                    std::process::exit(1);
-                }
-            }
-            Err(error) => {
-                println!("{}", serde_json::json!({"ok":false,"error":error}));
-                std::process::exit(1);
-            }
-        }
-        return;
+        std::process::exit(app_cli::run(&cli_args[1..]));
     }
+    // The window: no session's credential, before any thread starts.
+    inherited_env::forget();
     let mut args = std::env::args().skip(1);
     let mut fixture = false;
     let mut chat_fixture = false;
@@ -388,6 +395,7 @@ fn main() {
     let db = Arc::new(Mutex::new(db));
     let platform = gpui_platform::current_platform(false);
     let title_raster = particle_text::GlyphRaster(platform.text_system());
+    let hands_off = qa_hook_requested();
     gpui::Application::with_platform(platform)
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
@@ -423,60 +431,72 @@ fn main() {
             })
             .detach();
             let bounds = Bounds::centered(None, size(px(1180.), px(800.)), cx);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(820.), px(520.))),
-                    window_background: if cfg!(target_os = "macos") {
-                        WindowBackgroundAppearance::Blurred
-                    } else {
-                        WindowBackgroundAppearance::Opaque
-                    },
-                    // GPUI owns the custom chrome. AppKit must not reinterpret
-                    // its controls as native titlebar double-click/drag gestures.
-                    app_owns_titlebar_drag: cfg!(target_os = "macos"),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Monocode Native".into()),
-                        appears_transparent: cfg!(target_os = "macos"),
-                        traffic_light_position: if cfg!(target_os = "macos") {
-                            // Original macOS chrome: 12 pt left inset, with
-                            // 14 pt native buttons centered in the 40 pt bar.
-                            Some(point(px(12.), px((theme::TITLE_BAR_HEIGHT - 14.) / 2.)))
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        // Under the QA hook the window is ordered in without
+                        // becoming key, behind the active app's windows.
+                        focus: !hands_off,
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_min_size: Some(size(px(820.), px(520.))),
+                        window_background: if cfg!(target_os = "macos") {
+                            WindowBackgroundAppearance::Blurred
                         } else {
-                            None
+                            WindowBackgroundAppearance::Opaque
                         },
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let shell = cx.new(|cx| {
-                        shell::Shell::new_with_metadata(
-                            db,
-                            sessions,
-                            cwd,
-                            saved,
-                            sidebar_metadata,
-                            cx,
-                        )
-                    });
-                    shell.update(cx, |shell, cx| shell.focus_active(window, cx));
-                    #[cfg(target_os = "macos")]
-                    {
-                        traffic_lights::pin(window, theme::TITLE_BAR_HEIGHT);
-                        // AppKit rebuilds the buttons on some titlebar changes.
-                        shell.update(cx, |_, cx| {
-                            cx.observe_window_activation(window, |_, window, _| {
-                                traffic_lights::pin(window, theme::TITLE_BAR_HEIGHT)
-                            })
-                            .detach();
+                        // GPUI owns the custom chrome. AppKit must not reinterpret
+                        // its controls as native titlebar double-click/drag gestures.
+                        app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("Monocode Native".into()),
+                            appears_transparent: cfg!(target_os = "macos"),
+                            traffic_light_position: if cfg!(target_os = "macos") {
+                                // Original macOS chrome: 12 pt left inset, with
+                                // 14 pt native buttons centered in the 40 pt bar.
+                                Some(point(px(12.), px((theme::TITLE_BAR_HEIGHT - 14.) / 2.)))
+                            } else {
+                                None
+                            },
+                        }),
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        let shell = cx.new(|cx| {
+                            shell::Shell::new_with_metadata(
+                                db,
+                                sessions,
+                                cwd,
+                                saved,
+                                sidebar_metadata,
+                                cx,
+                            )
                         });
-                    }
-                    window.activate_window();
-                    shell
-                },
-            )
-            .expect("open GPUI window");
-            cx.activate(true);
+                        shell.update(cx, |shell, cx| shell.focus_active(window, cx));
+                        #[cfg(target_os = "macos")]
+                        {
+                            traffic_lights::pin(window, theme::TITLE_BAR_HEIGHT);
+                            // AppKit rebuilds the buttons on some titlebar changes.
+                            shell.update(cx, |_, cx| {
+                                cx.observe_window_activation(window, |_, window, _| {
+                                    traffic_lights::pin(window, theme::TITLE_BAR_HEIGHT)
+                                })
+                                .detach();
+                            });
+                        }
+                        if !hands_off {
+                            window.activate_window();
+                        }
+                        shell
+                    },
+                )
+                .expect("open GPUI window");
+            #[cfg(debug_assertions)]
+            qa_hook::start(window, cx);
+            #[cfg(not(debug_assertions))]
+            let _ = window;
+            if !hands_off {
+                cx.activate(true);
+            }
         });
 }
 

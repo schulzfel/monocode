@@ -292,7 +292,7 @@ pub(crate) fn render(
         .into_any_element()
 }
 /// launchedSessionState: where a session the Mono started stands.
-fn launched_state(session: &Conversation, cx: &App) -> &'static str {
+pub(super) fn launched_state(session: &Conversation, cx: &App) -> &'static str {
     if session.needs_approval() {
         "input"
     } else if session.busy {

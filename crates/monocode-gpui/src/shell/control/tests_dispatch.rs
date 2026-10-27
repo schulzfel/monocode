@@ -56,7 +56,7 @@ fn send(
                 Request::Call {
                     caller: CLIENT.into(),
                     request_id: None,
-                    command,
+                    command: Box::new(command),
                     reply,
                 },
                 window,
@@ -249,6 +249,7 @@ fn session_send_queues_or_steers_while_busy_and_stop_pauses(cx: &mut TestAppCont
                 session_id: b,
                 prompt: "Also update the docs".into(),
                 mode,
+                ..SessionSendInput::default()
             }),
             cx,
         )
@@ -344,7 +345,7 @@ fn dispatch_needs_its_scope_and_remote_work_is_refused(cx: &mut TestAppContext) 
         Command::SessionSend(SessionSendInput {
             session_id: a,
             prompt: "Hello".into(),
-            mode: None,
+            ..SessionSendInput::default()
         }),
         cx,
     )

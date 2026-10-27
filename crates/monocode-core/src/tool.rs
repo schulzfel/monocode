@@ -91,6 +91,14 @@ impl ToolCall {
     pub fn presentation_in(&self, cwd: Option<&str>) -> ToolPresentation {
         presentation::present(self, cwd)
     }
+    /// The MCP server and tool this call ran, in its provider's naming
+    /// (Claude's `mcp__<server>__<tool>`, Codex's `<server>:<tool>`, an ACP
+    /// title `<server>/<tool>`); `None` for any other tool.
+    pub fn mcp_tool(&self) -> Option<(&str, &str)> {
+        let input = serde_json::from_str::<serde_json::Value>(&self.input).unwrap_or_default();
+        let desktop = self.display.as_ref().unwrap_or(&input["__desktop"]);
+        mcp::identity(&self.name, &presentation::semantic_kind(desktop))
+    }
     /// Show the provider's actual input rather than the desktop adapter envelope.
     pub fn input_detail(&self) -> String {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&self.input) else {

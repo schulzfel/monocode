@@ -237,7 +237,7 @@ impl Protocol {
         self.acp_send(Stage::Initialize, "initialize", params, stdin)
     }
     fn acp_session(&mut self, stdin: &mut impl Write) -> Result<(), String> {
-        let mut params = json!({"cwd":self.request.cwd,"mcpServers":crate::app_mcp::acp_servers(&self.request.settings.environment)});
+        let mut params = json!({"cwd":self.request.cwd,"mcpServers":crate::app_mcp::acp_servers(self.request.kind, &self.request.settings.environment)});
         if let Some(id) = &self.request.provider_id {
             params["sessionId"] = id.clone().into();
             if matches!(self.request.kind, Kind::Grok | Kind::Fx | Kind::Antigravity) {
@@ -251,7 +251,7 @@ impl Protocol {
         self.acp_new(stdin)
     }
     fn acp_new(&mut self, stdin: &mut impl Write) -> Result<(), String> {
-        let mut params = json!({"cwd":self.request.cwd,"mcpServers":crate::app_mcp::acp_servers(&self.request.settings.environment)});
+        let mut params = json!({"cwd":self.request.cwd,"mcpServers":crate::app_mcp::acp_servers(self.request.kind, &self.request.settings.environment)});
         if self.request.kind == Kind::Grok {
             if self.request.settings.access == AccessMode::FullAccess {
                 params["_meta"] = json!({"yoloMode":true});
@@ -556,7 +556,7 @@ impl Protocol {
                 return self.acp_session(stdin);
             }
             Stage::Resume if !(kind == Kind::Antigravity && timed_out) => {
-                return self.acp_send(Stage::Load, "session/load", json!({"sessionId":self.request.provider_id,"cwd":self.request.cwd,"mcpServers":crate::app_mcp::acp_servers(&self.request.settings.environment)}), stdin);
+                return self.acp_send(Stage::Load, "session/load", json!({"sessionId":self.request.provider_id,"cwd":self.request.cwd,"mcpServers":crate::app_mcp::acp_servers(self.request.kind, &self.request.settings.environment)}), stdin);
             }
             Stage::Load => {
                 let lower = detail.to_lowercase();
@@ -1449,6 +1449,37 @@ mod tests {
                     .unwrap();
             }
             assert!(p.done);
+        }
+    }
+    /// R2: a turn's prompt names the MCP tools (`app_mcp::Access::Mcp`)
+    /// only where each ACP provider's resume or load sends the server; Grok
+    /// and Fx resume with the session alone (`keeps_servers_on_resume`).
+    #[test]
+    fn a_resumed_session_keeps_its_servers_only_where_the_app_says_so() {
+        let environment = crate::app_mcp::control_environment(
+            7,
+            "/data/control/monocode-control.sock",
+            std::path::Path::new("/Applications/MonoCode.app/monocode-gpui"),
+            &["mcp".into()],
+            crate::app_mcp::ROLE_SESSION,
+        );
+        for kind in Kind::ALL.into_iter().filter(|k| k.is_acp()) {
+            let mut p = protocol(kind);
+            p.request.provider_id = Some("saved".into());
+            p.request.settings.environment = environment.clone();
+            let mut out = Vec::new();
+            p.acp_session(&mut out).unwrap();
+            let servers = &last(&mut out)["params"]["mcpServers"];
+            let kept = servers
+                .as_array()
+                .is_some_and(|s| s.iter().any(|s| s["name"] == "monocode"));
+            // What its prompt names (`Access`) is what the resumed turn has.
+            let access = crate::app_mcp::Access::of(kind, &environment, "none");
+            assert_eq!(
+                kept,
+                access == crate::app_mcp::Access::Mcp,
+                "{kind:?}: {servers}"
+            );
         }
     }
     #[test]

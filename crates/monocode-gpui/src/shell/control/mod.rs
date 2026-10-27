@@ -16,8 +16,10 @@ mod activity;
 mod auth;
 mod caller;
 mod confirm;
+mod defaults;
 mod exec;
 mod feed;
+mod gate;
 mod hub;
 mod in_app;
 mod listener;
@@ -28,9 +30,15 @@ mod receipts;
 mod session_caller;
 mod settings_page;
 #[cfg(test)]
+mod test_hooks;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_automation;
+#[cfg(test)]
+mod tests_capacity;
+#[cfg(test)]
+mod tests_cli;
 #[cfg(test)]
 mod tests_confirm;
 #[cfg(test)]
@@ -41,6 +49,10 @@ mod tests_discard;
 mod tests_dispatch;
 #[cfg(test)]
 mod tests_exec;
+#[cfg(test)]
+mod tests_gate;
+#[cfg(test)]
+mod tests_gate_mono;
 #[cfg(test)]
 mod tests_http;
 #[cfg(test)]
@@ -54,7 +66,13 @@ mod tests_manage;
 #[cfg(test)]
 mod tests_mono;
 #[cfg(test)]
+mod tests_operator;
+#[cfg(test)]
+mod tests_operator_ops;
+#[cfg(test)]
 mod tests_ops;
+#[cfg(test)]
+mod tests_parity;
 #[cfg(test)]
 mod tests_push;
 #[cfg(test)]
@@ -66,6 +84,10 @@ mod tests_scoped;
 #[cfg(test)]
 mod tests_session;
 #[cfg(test)]
+mod tests_thread;
+#[cfg(test)]
+mod tests_thread_ops;
+#[cfg(test)]
 mod tests_vcs;
 #[cfg(test)]
 mod tests_window;
@@ -73,6 +95,7 @@ mod tests_window;
 use super::*;
 use crate::settings::{ExternalControlEdit, ExternalControlStatus};
 use caller::CallerKind;
+pub(crate) use gate::MONO_OPS;
 use monocode_control::{
     ACTIVITY_KEY, ControlError, Endpoint, ErrorCode, Grant, POLICY_KEY, Policy, Scope,
     transport::{BindError, Listener},
@@ -104,12 +127,19 @@ impl Default for Timeouts {
     }
 }
 
+/// The start of the banner that says the sessions' MonoCode tools are
+/// unavailable.
+const UNAVAILABLE: &str = "MonoCode tools are unavailable: ";
+
 /// What the shell keeps for external control.
 pub(super) struct Control {
     policy: Policy,
     /// The data folder's endpoint; `None` for an in-memory store.
     endpoint: Option<Result<Endpoint, ControlError>>,
     server: Option<listener::Server>,
+    /// Whether the person was told that the socket cannot be served, since
+    /// it last was.
+    told_unavailable: bool,
     /// The MCP server on localhost, while it runs.
     http: Option<mcp_http::Serving>,
     /// Why the MCP server is on but not serving.
@@ -151,6 +181,7 @@ impl Default for Control {
             policy: Policy::default(),
             endpoint: None,
             server: None,
+            told_unavailable: false,
             http: None,
             http_error: None,
             // Any free port until the shell knows its data folder.
@@ -215,7 +246,7 @@ impl Shell {
                         if let (Some(Ok(endpoint)), Some(bound)) =
                             (this.control.endpoint.clone(), bound)
                         {
-                            this.start_control(&endpoint, bound);
+                            this.start_control(&endpoint, bound, cx);
                         }
                     }
                     Err(error) => eprintln!("Cannot read the external control policy: {error}"),
@@ -242,9 +273,12 @@ impl Shell {
             match self.control.endpoint.clone() {
                 Some(Ok(endpoint)) => {
                     let bound = Listener::bind(&endpoint);
-                    self.start_control(&endpoint, bound);
+                    self.start_control(&endpoint, bound, cx);
                 }
-                Some(Err(error)) => eprintln!("Cannot serve the control socket: {error}"),
+                Some(Err(error)) => {
+                    eprintln!("Cannot serve the control socket: {error}");
+                    self.control_unavailable(&error.message, cx);
+                }
                 // An in-memory store has no data folder to put a socket in.
                 None => {}
             }
@@ -253,21 +287,50 @@ impl Shell {
         self.sync_settings(cx);
     }
 
-    fn start_control(&mut self, endpoint: &Endpoint, bound: Result<Listener, BindError>) {
+    fn start_control(
+        &mut self,
+        endpoint: &Endpoint,
+        bound: Result<Listener, BindError>,
+        cx: &mut Context<Self>,
+    ) {
         let version = crate::notifications::updater::version().to_owned();
         let requests = self.control.requests.clone();
         match bound
             .and_then(|bound| listener::Server::start_with(bound, endpoint, version, requests))
         {
-            Ok(server) => self.control.server = Some(server),
-            Err(error) => eprintln!("Cannot serve the control socket: {error}"),
+            Ok(server) => {
+                self.control.server = Some(server);
+                // The banner of an earlier failure is out of date now; any
+                // other message the window shows stays.
+                if self
+                    .error
+                    .as_deref()
+                    .is_some_and(|shown| shown.starts_with(UNAVAILABLE))
+                {
+                    self.error = None;
+                    cx.notify();
+                }
+                self.control.told_unavailable = false;
+            }
+            Err(error) => {
+                eprintln!("Cannot serve the control socket: {error}");
+                self.control_unavailable(&error.to_string(), cx);
+            }
+        }
+    }
+
+    /// Tells the person, once, that the sessions' MonoCode tools are
+    /// unavailable: the socket cannot be served, for `reason`.
+    fn control_unavailable(&mut self, reason: &str, cx: &mut Context<Self>) {
+        if !std::mem::replace(&mut self.control.told_unavailable, true) {
+            self.error = Some(format!("{UNAVAILABLE}{reason}"));
+            cx.notify();
         }
     }
 
     /// Answers the socket's and the HTTP sessions' requests on the UI
     /// thread. Not in tests: the test scheduler forbids wake-ups from
-    /// other threads, so tests call `handle_control` directly, as the
-    /// Operator bridge's tests do.
+    /// other threads, so tests call `handle_control` directly.
     fn drain_control(&self, cx: &mut Context<Self>) {
         let requests = self.control.received.clone();
         cx.spawn(async move |this, cx| {
@@ -302,7 +365,7 @@ impl Shell {
                 Pending {
                     caller,
                     request_id,
-                    command,
+                    command: *command,
                     reply,
                 },
                 window,
@@ -324,62 +387,23 @@ impl Shell {
         }
     }
 
-    fn control_call(&mut self, call: Pending, window: &mut Window, cx: &mut Context<Self>) {
-        let grant = match self.control_grant(&call.caller, &call.command) {
+    fn control_call(&mut self, mut call: Pending, window: &mut Window, cx: &mut Context<Self>) {
+        // A session's credential may stand for a Mono; who it is now decides.
+        let checked = self.resolve_caller(&call.caller, cx).and_then(|caller| {
+            call.caller = caller;
+            let grant = self.control_grant(&call.caller, &call.command, cx)?;
+            // Before the receipt, so it records the call as it runs.
+            self.control_defaults(&mut call, cx)?;
+            Ok(grant)
+        });
+        let grant = match checked {
             Ok(grant) => grant,
-            Err(error) => {
-                // A refusal is not a result: no receipt, so a retry after
-                // the person grants the scope runs for real.
-                let result = Err(error);
-                let wire = activity::wire(&call.command, call.request_id.as_deref());
-                self.record_control(&call.caller, &call.command, wire.as_ref(), &result, cx);
-                let _ = call.reply.send(result);
-                return;
-            }
+            Err(error) => return self.refuse_control(call, error, cx),
         };
         if call.request_id.is_some() {
             self.control_with_receipt(call, grant, window, cx);
         } else {
             self.run_control(call, &grant, window, cx);
-        }
-    }
-
-    /// The caller's current grant, if it may make the call: it holds every
-    /// scope the call needs (`Command::scopes`), and a session does not act
-    /// on itself where the operation forbids that (`Operation::NOT_ON_SELF`).
-    fn control_grant(
-        &self,
-        caller: &CallerKind,
-        command: &monocode_control::Command,
-    ) -> Result<Grant, ControlError> {
-        if let CallerKind::Session(me) = caller
-            && command.not_on_self()
-            && command.target_session() == Some(*me)
-        {
-            return Err(ControlError::invalid_input(format!(
-                "{} cannot target session {me}: that is the session making this call. A session may not stop, archive, delete, reconfigure or wait on itself; name another session.",
-                command.name()
-            )));
-        }
-        let scopes = command.scopes();
-        let grant = self.control_scope(caller, scopes[0], command.name())?;
-        for scope in &scopes[1..] {
-            self.control_scope(caller, *scope, command.name())?;
-        }
-        Ok(grant)
-    }
-
-    /// The checks a call's target gets before it runs, as its operation
-    /// declares them: a remote session is read-only to clients
-    /// (`Operation::LOCAL_ONLY`).
-    fn control_target(
-        &self,
-        command: &monocode_control::Command,
-        cx: &App,
-    ) -> Result<(), ControlError> {
-        match command.target_session() {
-            Some(id) if command.local_only() => self.control_local_session(id, cx),
-            _ => Ok(()),
         }
     }
 
@@ -394,7 +418,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = self.control_target(&call.command, cx) {
+        if let Err(error) = self.control_target(&call.caller, &call.command, cx) {
             return self.finish_control(call, Err(error), cx);
         }
         match (call.command.confirmed(), call.caller.confirms()) {

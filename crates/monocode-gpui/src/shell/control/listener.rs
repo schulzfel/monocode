@@ -3,14 +3,16 @@
 //! up to [`MAX_CALLS`] calls at once, each on its own scoped thread, so a
 //! long `session_wait` never holds up a read on the same connection. A
 //! connection that follows topics gets one more thread, which writes the
-//! events the shell queues for it.
+//! events the shell queues for it. How many connections are served at once
+//! depends on their kind (`caps`).
 use super::{caller::CallerKind, feed::Feed, hub};
+use crate::runtime::app_control::Serving;
 use monocode_control::{
     ClientInfo, Command, ControlError, Endpoint, ErrorCode, Grant, PROTOCOL_VERSION,
     SessionCredential, Topic,
     frame::{
-        self, ClientFrame, Event, FrameError, Hello, MAX_CONNECTIONS, MAX_REQUEST_BYTES,
-        MAX_RESPONSE_BYTES, Outcome, Reply, ServerFrame, Welcome,
+        self, ClientFrame, Event, FrameError, Hello, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+        Outcome, Reply, ServerFrame, Welcome,
     },
     lock,
     transport::{BindError, Connection, Listener},
@@ -26,6 +28,11 @@ use std::{
     thread::JoinHandle,
     time::Duration,
 };
+
+mod caps;
+
+pub(super) use caps::Caps;
+use caps::{Slot, Slots};
 
 /// How long a new connection may take to say hello.
 const HELLO_WAIT: Duration = Duration::from_secs(10);
@@ -61,7 +68,7 @@ pub(super) enum Request {
     Call {
         caller: CallerKind,
         request_id: Option<String>,
-        command: Command,
+        command: Box<Command>,
         reply: SyncSender<Result<Value, ControlError>>,
     },
     /// A welcomed client follows topics; its events go into `events`.
@@ -83,10 +90,13 @@ pub(super) enum Request {
 }
 
 /// A running listener. Dropping it stops accepting and removes the socket.
+/// While it runs, its endpoint counts as served, so new sessions get the
+/// relay (`app_control`).
 pub(super) struct Server {
     endpoint: Endpoint,
     stop: Arc<AtomicBool>,
     accept: Option<JoinHandle<()>>,
+    _serving: Serving,
 }
 
 impl Server {
@@ -98,8 +108,19 @@ impl Server {
         endpoint: &Endpoint,
         app_version: String,
     ) -> Result<(Self, async_channel::Receiver<Request>), BindError> {
+        Self::start_capped(listener, endpoint, app_version, Caps::default())
+    }
+
+    /// [`start`](Self::start), serving at most `caps` connections.
+    #[cfg(test)]
+    pub(super) fn start_capped(
+        listener: Listener,
+        endpoint: &Endpoint,
+        app_version: String,
+        caps: Caps,
+    ) -> Result<(Self, async_channel::Receiver<Request>), BindError> {
         let (requests, received) = async_channel::unbounded();
-        Self::start_with(listener, endpoint, app_version, requests).map(|s| (s, received))
+        Self::spawn(listener, endpoint, app_version, requests, caps).map(|s| (s, received))
     }
 
     /// Serves `listener`, bound on `endpoint`, sending the requests to
@@ -110,16 +131,28 @@ impl Server {
         app_version: String,
         requests: async_channel::Sender<Request>,
     ) -> Result<Self, BindError> {
+        Self::spawn(listener, endpoint, app_version, requests, Caps::default())
+    }
+
+    fn spawn(
+        listener: Listener,
+        endpoint: &Endpoint,
+        app_version: String,
+        requests: async_channel::Sender<Request>,
+        caps: Caps,
+    ) -> Result<Self, BindError> {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
+        let slots = Slots::new(caps);
         let accept = std::thread::Builder::new()
             .name("control-accept".into())
-            .spawn(move || accept_loop(&listener, &requests, &stopping, &app_version))
+            .spawn(move || accept_loop(&listener, &requests, &stopping, &app_version, &slots))
             .map_err(BindError::Io)?;
         Ok(Self {
             endpoint: endpoint.clone(),
             stop,
             accept: Some(accept),
+            _serving: crate::runtime::app_control::serving(endpoint),
         })
     }
 }
@@ -142,8 +175,8 @@ fn accept_loop(
     requests: &async_channel::Sender<Request>,
     stop: &Arc<AtomicBool>,
     app_version: &str,
+    slots: &Arc<Slots>,
 ) {
-    let active = Arc::new(AtomicUsize::new(0));
     loop {
         let accepted = listener.accept();
         if stop.load(Ordering::SeqCst) {
@@ -154,28 +187,18 @@ fn accept_loop(
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
-        if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-            active.fetch_sub(1, Ordering::SeqCst);
-            let busy = ControlError::internal("MonoCode is serving too many control connections")
-                .retryable(true);
+        let Some(slot) = slots.accept() else {
             let _ = connection.set_write_timeout(Some(WRITE_WAIT));
-            let _ = frame::write_frame(
-                &mut &connection,
-                &ServerFrame::Error(busy),
-                MAX_RESPONSE_BYTES,
-            );
+            send_error(&connection, caps::too_many());
             continue;
-        }
+        };
         let requests = requests.clone();
         let stop = stop.clone();
-        let active = active.clone();
         let app_version = app_version.to_owned();
+        // A thread that cannot start drops its slot with the closure.
         let spawned = std::thread::Builder::new()
             .name("control-connection".into())
-            .spawn(move || {
-                serve(&connection, &requests, &stop, &app_version);
-                active.fetch_sub(1, Ordering::SeqCst);
-            });
+            .spawn(move || serve(&connection, slot, &requests, &stop, &app_version));
         if spawned.is_err() {
             continue;
         }
@@ -191,8 +214,10 @@ fn send_error(connection: &Connection, error: ControlError) {
 }
 
 /// Serves one connection: hello first, then calls until the client leaves.
+/// Its `slot` is given back when it returns.
 fn serve(
     connection: &Connection,
+    slot: Slot,
     requests: &async_channel::Sender<Request>,
     stop: &AtomicBool,
     app_version: &str,
@@ -208,6 +233,11 @@ fn serve(
     };
     // A session's calls are its own, whatever name the client says.
     let caller = CallerKind::of_hello(&client, session.as_ref());
+    let app_caller = matches!(caller, CallerKind::Session(_) | CallerKind::Mono { .. });
+    let _slot = match slot.settle(app_caller) {
+        Ok(slot) => slot,
+        Err(error) => return send_error(connection, error),
+    };
     let grant = match decide(requests, client, session) {
         Ok(grant) => grant,
         Err(error) => return send_error(connection, error),
@@ -427,7 +457,7 @@ pub(super) fn ask(
     let request = Request::Call {
         caller: caller.clone(),
         request_id,
-        command,
+        command: Box::new(command),
         reply,
     };
     if requests.send_blocking(request).is_err() {

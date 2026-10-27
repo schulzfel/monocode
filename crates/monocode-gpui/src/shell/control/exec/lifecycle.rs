@@ -93,14 +93,16 @@ impl Shell {
         })))
     }
 
-    /// The title of session `id` when a client may delete it: a local
-    /// project session that is no Mono's chat and no orchestration worker.
+    /// The title of session `id` when `caller` may delete it: a local
+    /// project session `caller` reaches (`control_session_for`) that is no
+    /// orchestration worker.
     pub(in crate::shell::control) fn deletable_session(
         &self,
+        caller: &CallerKind,
         id: i64,
         cx: &App,
     ) -> Result<String, ControlError> {
-        self.control_local_session(id, cx)?;
+        self.control_local_session_for(caller, id, cx)?;
         if self.orchestration_worker(id) {
             return Err(ControlError::invalid_input(format!(
                 "Session {id} is an orchestration worker; it belongs to its lead's orchestration and is not deleted on its own."
@@ -112,24 +114,26 @@ impl Shell {
     pub(super) fn control_session_delete(
         &mut self,
         id: i64,
+        caller: &CallerKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Exec, ControlError> {
-        let title = self.deletable_session(id, cx)?;
-        let deleted = self
-            .delete_session_checked(id, window, cx)
-            .map_err(|error| {
-                ControlError::invalid_input(
-                    error.unwrap_or_else(|| format!("Session {id} could not be deleted")),
-                )
-            })?;
-        Ok(Exec::Later(cx.spawn(async move |this, cx| {
+        let title = self.deletable_session(caller, id, cx)?;
+        // A refusal answers with its own reason, never an older message the
+        // window still shows; that one stays for the person.
+        let shown = self.error.take();
+        let checked = self.delete_session_checked(id, window, cx);
+        let reason = self.error.take();
+        self.error = reason.clone().or(shown);
+        let deleted = checked.map_err(|_| {
+            ControlError::invalid_input(
+                reason.unwrap_or_else(|| format!("Session {id} could not be deleted")),
+            )
+        })?;
+        Ok(Exec::Later(cx.spawn(async move |_, _| {
             if !deleted.await.map_err(ControlError::internal)? {
-                let error = this
-                    .read_with(cx, |this, _| this.error.clone().unwrap_or_default())
-                    .map_err(|_| closed())?;
                 return Err(ControlError::internal(format!(
-                    "Session {id} could not be deleted: {error}"
+                    "Session {id} could not be deleted; its data was preserved."
                 )));
             }
             output(&SessionDeleteOutput {

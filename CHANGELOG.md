@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Monos use **MonoCode's MCP tools** for their sessions, memory, soul, habits, artifacts and cards when their provider takes MCP servers. Pi, OpenCode and Omp Monos keep using the `app` command.
+
+### Changed
+
+- Every local agent session can use MonoCode's tools without `/operator`: Claude Code, Codex and ACP agents through the `monocode` MCP server, and Pi, OpenCode and Omp agents through the `app` command. `/operator` now adds instructions that point the thread's agent at MonoCode and the thread's project; the agent may work in another project when asked. Orchestration workers and remote sessions get no MonoCode tools.
+- Read-only access is enforced for every session: in plan mode, on an orchestration lead's turns and with the read-only access mode, MonoCode tools that change something are refused.
+- The `app` command reaches the app through MonoCode's control socket; the old local bridge is removed. Its dotted action names, such as `sessions.start`, are still accepted beside the new operation names, and `app help` lists both.
+- When a Mono stops a session, that session's queued messages are paused even if it was idle, so they wait instead of running.
+- Changes made by agents in MonoCode sessions and by Monos appear in **Settings → General → MCP server → Recent activity** under the session's or Mono's name.
+
 ## [0.16.0] - 2026-10-19
 
 ### Added

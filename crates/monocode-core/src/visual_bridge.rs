@@ -796,7 +796,10 @@ mod tests {
         let response = mcp_response(json!({"id":2,"method":"tools/call","params":{"name":"visual_show","arguments":input()}}), &environment).unwrap();
         assert_eq!(response["result"]["isError"], true);
         assert_eq!(tool_definitions().len(), 3);
-        assert_eq!(crate::app_mcp::acp_servers(&environment), json!([]));
+        assert_eq!(
+            crate::app_mcp::acp_servers(crate::provider::Kind::Cursor, &environment),
+            json!([])
+        );
     }
 
     #[test]
@@ -874,9 +877,29 @@ mod tests {
         assert!(arguments.contains("visual-mcp"));
         assert!(arguments.contains(ENV_TOKEN));
         assert!(!arguments.contains(&environment[ENV_TOKEN]));
-        let acp = crate::app_mcp::acp_servers(&environment);
+        let acp = crate::app_mcp::acp_servers(crate::provider::Kind::Cursor, &environment);
         assert_eq!(acp[0]["name"], "monocode_visual");
         assert_eq!(acp[0]["env"].as_array().unwrap().len(), 4);
         assert_eq!(app_server(&environment).unwrap().command, "/test/app");
+    }
+
+    /// OpenCode takes MCP servers over ACP but not MonoCode's control
+    /// server; its visual server is configured as before.
+    #[test]
+    fn a_provider_without_the_control_server_keeps_its_visual_server() {
+        let server = Server::start(85).unwrap();
+        let mut environment = server.environment(std::path::Path::new("/test/app"));
+        environment.extend(crate::app_mcp::control_environment(
+            85,
+            "/data/control/monocode-control.sock",
+            std::path::Path::new("/test/app"),
+            &["mcp".into()],
+            crate::app_mcp::ROLE_SESSION,
+        ));
+        let acp = crate::app_mcp::acp_servers(crate::provider::Kind::OpenCode, &environment);
+        assert_eq!(acp.as_array().unwrap().len(), 1, "{acp}");
+        assert_eq!(acp[0]["name"], "monocode_visual");
+        let acp = crate::app_mcp::acp_servers(crate::provider::Kind::Cursor, &environment);
+        assert_eq!(acp[1]["name"], "monocode");
     }
 }

@@ -1,7 +1,5 @@
 //! Persistent Mono identities and app-owned context, shared by native views,
 //! scheduled runs and the local app CLI. React's monos/model is the reference.
-pub mod api;
-pub mod bridge;
 pub mod cards;
 mod desktop;
 pub mod files;
@@ -13,6 +11,7 @@ pub(crate) use desktop::codex_home;
 mod tests;
 
 use crate::{
+    app_mcp::Access,
     project_appearance::{Background, COLORS, MASCOTS},
     store::Store,
     transcript::Row,
@@ -302,7 +301,20 @@ pub fn load_files(root: &Path, mono: &Mono) -> Result<files::AgentFiles, String>
     Ok(files)
 }
 
-pub fn context(mono: &Mono, files: &files::AgentFiles, executable: &Path) -> String {
+/// The tools paragraph of the context of a Mono whose provider gets the
+/// `monocode` MCP server.
+const MCP_TOOLS: &str = "Your MonoCode tools are the `monocode` MCP tools; their credentials are handled for you. Use session_*, worktree_* and folder tools with project set to an assigned path. Use session_start for substantial independent work, inherit your model unless another is appropriate, and avoid overlapping edits. Once delegation is accepted, tell the user and end your turn. You will receive one completion report after every session in that turn's group stops; then inspect and integrate the results. session_send supports notifyOnComplete:true. Never poll delegated work.";
+
+/// What MonoCode tells a Mono at the start of a provider session. Its tools
+/// are named as `access` reaches them: the MCP tools by their names, or the
+/// `executable`'s `app` command with the old action names, which it still
+/// accepts. Without either, the command paragraph says so.
+pub fn context(
+    mono: &Mono,
+    files: &files::AgentFiles,
+    executable: &Path,
+    access: Access,
+) -> String {
     let cli = format!(
         "{} app",
         shlex::try_quote(&executable.to_string_lossy()).unwrap_or_default()
@@ -316,8 +328,41 @@ pub fn context(mono: &Mono, files: &files::AgentFiles, executable: &Path) -> Str
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let unavailable = match access {
+        Access::Unavailable(why) => format!(" MonoCode tools are unavailable in this run ({why}); tell the user if they ask you to act in MonoCode."),
+        Access::Mcp | Access::Cli => String::new(),
+    };
+    let tools = if access == Access::Mcp {
+        MCP_TOOLS.to_owned()
+    } else {
+        format!("The app CLI is `{cli} OPERATION --json JSON`. Its credentials are already in your environment; never print them. Run `{cli} help` for the exact actions and inputs. Use sessions.*, worktrees.* and folders.* with project set to an assigned path. Use sessions.start for substantial independent work, inherit your model unless another is appropriate, and avoid overlapping edits. Once delegation is accepted, tell the user and end your turn. You will receive one completion report after every session in that turn's group stops; then inspect and integrate the results. sessions.send supports notifyOnComplete:true. Never poll delegated work.{unavailable}")
+    };
+    let [soul_read, soul_update, memory_edit, memory_search, memory_read, habit_add, artifact_write, notes_write] =
+        if access == Access::Mcp {
+            [
+                "mono_soul_read",
+                "mono_soul_update",
+                "mono_memory_add/replace/remove",
+                "mono_memory_search",
+                "mono_memory_read",
+                "mono_habit_add",
+                "mono_artifact_write",
+                "notes_write",
+            ]
+        } else {
+            [
+                "soul.read",
+                "soul.update",
+                "memory.add/replace/remove",
+                "memory.search",
+                "memory.read",
+                "habits.add",
+                "artifacts.write",
+                "notes.write",
+            ]
+        };
     format!(
-        "<monocode_context>\nMonoCode adds this context, not the user. Act on it without quoting or describing it.\n\nYou are {}, a persistent Mono in MonoCode. Work only on the projects assigned to you:\n{projects}\n\nThe app CLI is `{cli} ACTION --json JSON`. Its credentials are already in your environment; never print them. Run `{cli} help` for the exact actions and inputs. Use sessions.*, worktrees.* and folders.* with project set to an assigned path. Use sessions.start for substantial independent work, inherit your model unless another is appropriate, and avoid overlapping edits. Once delegation is accepted, tell the user and end your turn. You will receive one completion report after every session in that turn's group stops; then inspect and integrate the results. sessions.send supports notifyOnComplete:true. Never poll delegated work.\n\n<soul>\n{}\n</soul>\nStanding instructions rank below the user's current request. Change your soul only when asked, through soul.read and soul.update with expectedHash; never edit its file directly.\n\n<memory>\n{}\nTopic notes: {}\n</memory>\nKeep useful facts through memory.add/replace/remove, use memory.search before answering about earlier facts, and never save credentials. Topic notes are read with memory.read.\n\nHabits are scheduled work in separate sessions. Suggest them when useful, but add one with habits.add only after agreement. State whether its instructions allow changes. Quiet runs should return NOTHING_TO_REPORT.\n\nSave substantial reports with artifacts.write, kind document or html, title, summary and complete body. Cards appear in the chat and overview. Use notes.write only for the user's Notes.\n\nFor acknowledgements requiring no words, your whole reply may be <reaction>👍</reaction> with one fitting emoji. Questions and requests still get a written answer.\n</monocode_context>",
+        "<monocode_context>\nMonoCode adds this context, not the user. Act on it without quoting or describing it.\n\nYou are {}, a persistent Mono in MonoCode. Work only on the projects assigned to you:\n{projects}\n\n{tools}\n\n<soul>\n{}\n</soul>\nStanding instructions rank below the user's current request. Change your soul only when asked, through {soul_read} and {soul_update} with expectedHash; never edit its file directly.\n\n<memory>\n{}\nTopic notes: {}\n</memory>\nKeep useful facts through {memory_edit}, use {memory_search} before answering about earlier facts, and never save credentials. Topic notes are read with {memory_read}.\n\nHabits are scheduled work in separate sessions. Suggest them when useful, but add one with {habit_add} only after agreement. State whether its instructions allow changes. Quiet runs should return NOTHING_TO_REPORT.\n\nSave substantial reports with {artifact_write}, kind document or html, title, summary and complete body. Cards appear in the chat and overview. Use {notes_write} only for the user's Notes.\n\nFor acknowledgements requiring no words, your whole reply may be <reaction>👍</reaction> with one fitting emoji. Questions and requests still get a written answer.\n</monocode_context>",
         mono.label(),
         files.soul.as_deref().unwrap_or_default(),
         memory::within_budget(&files.memory),

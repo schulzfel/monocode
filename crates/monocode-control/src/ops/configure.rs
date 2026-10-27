@@ -97,7 +97,7 @@ pub struct SessionDraftInput {
 pub struct SessionDraftOutput {
     /// The session's id.
     pub session_id: i64,
-    /// Whether the draft is in the composer.
+    /// Whether the draft was saved in the session.
     pub saved: bool,
 }
 
@@ -108,6 +108,7 @@ impl Operation for SessionDraft {
     const SCOPE: Scope = Scope::Dispatch;
     const DESCRIPTION: &'static str = "Leave an unsent message in an idle session's composer for the person to review and send. Nothing is sent. Fails with session_not_idle when the person already has an unsent draft there, which is kept.";
     const HINTS: Hints = Hints::IDEMPOTENT;
+    const NOT_ON_SELF: bool = true;
     const LOCAL_ONLY: bool = true;
     type Input = SessionDraftInput;
     type Output = SessionDraftOutput;
@@ -117,6 +118,10 @@ impl Operation for SessionDraft {
     }
 
     fn summary(output: &SessionDraftOutput) -> String {
-        format!("Draft saved in session {}", output.session_id)
+        if output.saved {
+            format!("Draft saved in session {}", output.session_id)
+        } else {
+            format!("Draft not saved in session {}", output.session_id)
+        }
     }
 }

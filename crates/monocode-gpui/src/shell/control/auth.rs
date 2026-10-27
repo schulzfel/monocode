@@ -39,7 +39,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(credential) = session {
-            let _ = reply.send(self.session_hello(&credential));
+            let _ = reply.send(self.session_hello(&credential, cx));
             return;
         }
         if !self.control.policy.enabled {

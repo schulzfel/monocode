@@ -73,7 +73,11 @@ impl Shell {
                     (metadata.summary.cwd.clone(), metadata.display_title()),
                 )
             })
-            .filter(|(_, (cwd, _))| project.as_ref().is_none_or(|p| p == cwd))
+            .filter(|(_, (cwd, _))| {
+                project.as_ref().is_none_or(|p| {
+                    monocode_core::files::path_key(p) == monocode_core::files::path_key(cwd)
+                })
+            })
             .collect();
         let store = self.store.clone();
         let (cancel, clock) = deadline(cx);
@@ -117,12 +121,13 @@ impl Shell {
     pub(super) fn control_search_project(
         &self,
         input: SearchProjectInput,
+        caller: &CallerKind,
         cx: &App,
     ) -> Result<Exec, ControlError> {
         let prepared = (|| {
             let query = query(&input.query)?;
             let limit = ops::limit(input.limit, DEFAULT_FILE_MATCHES, MAX_FILE_MATCHES)?;
-            let project = self.control_local_project(input.project.as_deref())?;
+            let project = self.control_local_project_for(caller, input.project.as_deref(), cx)?;
             Ok::<_, ControlError>((query, limit, project))
         })();
         let (query, limit, project) = prepared?;

@@ -36,7 +36,7 @@ fn operator_launch_applies_validated_overrides_without_transferring_app_access()
     };
     inherited
         .environment
-        .insert("MONOCODE_APP_TOKEN".into(), "private".into());
+        .insert(crate::app_mcp::ENV_TOKEN.into(), "private".into());
     let input = json!({"prompt":"Review","model":"test-model","runtimeMode":"read-only","effort":"high","modelSettings":{"fast":"true","custom":"b","serviceTier":"fast"}});
     let settings = launch_settings(&input, "codex", inherited, Kind::Codex, &[model()]).unwrap();
     assert_eq!(settings.access, AccessMode::ReadOnly);
@@ -53,6 +53,9 @@ fn operator_launch_applies_validated_overrides_without_transferring_app_access()
         json!({"modelSettings":{"custom":"invalid"}}),
         json!({"effort":"unknown"}),
         json!({"modelSettings":{"custom":true}}),
+        // A pane to split beside needs a side to split it on.
+        json!({"besideSessionId":1}),
+        json!({"placement":"tab","besideSessionId":1}),
     ] {
         assert!(
             launch_settings(&bad, "codex", Settings::default(), Kind::Codex, &[model()]).is_err(),
@@ -109,34 +112,8 @@ fn operator_thread_access_survives_reopen_without_enabling_other_sessions() {
 }
 
 #[test]
-fn operator_rejects_unknown_fields_and_mono_only_capabilities() {
-    for (action, input) in [
-        ("sessions.start", json!({"prompt":"x","sidebarHidden":true})),
-        ("sessions.start", json!({"prompt":"x","reveal":"false"})),
-        (
-            "sessions.start",
-            json!({"prompt":"x","runtimeMode":"unsafe"}),
-        ),
-        ("sessions.start", json!({"prompt":"x","placement":"left"})),
-        ("sessions.start", json!({"prompt":"x","besideSessionId":1})),
-        (
-            "sessions.send",
-            json!({"sessionId":1,"prompt":"x","notifyOnComplete":true}),
-        ),
-        ("artifacts.write", json!({"body":"x"})),
-    ] {
-        assert!(
-            validate_operator(action, &input).is_err(),
-            "{action}: {input}"
-        );
-    }
+fn a_launch_prompt_cannot_turn_on_operator() {
     assert!(prompt(&json!({"prompt":"/operator do something"})).is_err());
-    assert!(validate_operator("sessions.archive", &json!({"sessionId":"desktop-uuid"})).is_ok());
-    assert!(validate_operator(
-        "sessions.start",
-        &json!({"prompt":"x","placement":"down","besideSessionId":"uuid","effort":"high"})
-    )
-    .is_ok());
 }
 
 #[test]
@@ -178,6 +155,10 @@ fn conversation_pages_keep_source_cursors_prose_boundaries_and_character_caps() 
 fn operator_notes_support_desktop_ids_partial_updates_empty_bodies_and_pagination() {
     let store = Store::open_monocode(Path::new(":memory:")).unwrap();
     let caller = store.create("codex", "/project").unwrap();
+    let projects = ["/project".to_owned()];
+    let write = |request: &str, write: NoteWrite| {
+        write_note(&store, Some(caller.id), request, write, &projects).unwrap()
+    };
     let original = store
         .upsert_note(&NoteUpsert {
             id: "desktop-note-uuid".into(),
@@ -188,65 +169,37 @@ fn operator_notes_support_desktop_ids_partial_updates_empty_bodies_and_paginatio
             ..Default::default()
         })
         .unwrap();
-    let updated = notes_action(
-        &store,
-        caller.id,
+    let updated = write(
         "update",
-        "notes.write",
-        &json!({"id":original.id,"body":""}),
-        &["/project".into()],
-    )
-    .unwrap();
-    assert_eq!(updated["title"], "Original");
-    assert_eq!(updated["body"], "");
-    assert_eq!(updated["tags"], json!(["keep"]));
+        NoteWrite {
+            id: Some(original.id.clone()),
+            body: Some(String::new()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(updated.title, "Original");
+    assert_eq!(updated.body, "");
+    assert_eq!(updated.tags, ["keep"]);
     assert!(
-        updated["sourceSessionId"].is_null(),
+        updated.source_session_id.is_none(),
         "an update keeps the original note provenance"
     );
     let alias = crate::store::desktop_session_handle(&original.id) as u64;
-    let restored = notes_action(
-        &store,
-        caller.id,
-        "legacy-read",
-        "notes.read",
-        &json!({"id":alias}),
-        &["/project".into()],
-    )
-    .unwrap();
-    assert_eq!(restored["id"], original.id);
-    let created = notes_action(
-        &store,
-        caller.id,
-        "create",
-        "notes.write",
-        &json!({"body":"# Inferred title\n\nUseful preview","tags":["#Work"]}),
-        &["/project".into()],
-    )
-    .unwrap();
-    assert_eq!(created["title"], "Inferred title");
-    assert_eq!(created["tags"], json!(["work"]));
-    let again = notes_action(
-        &store,
-        caller.id,
-        "create",
-        "notes.write",
-        &json!({"body":"# Inferred title\n\nUseful preview","tags":["#Work"]}),
-        &["/project".into()],
-    )
-    .unwrap();
-    assert_eq!(created["id"], again["id"]);
-    let page = notes_action(
-        &store,
-        caller.id,
-        "list",
-        "notes.list",
-        &json!({"limit":1,"offset":1}),
-        &["/project".into()],
-    )
-    .unwrap();
-    assert_eq!(page["total"], 2);
-    assert_eq!(page["notes"].as_array().unwrap().len(), 1);
+    let restored = read_note(&store, &projects, &alias.to_string()).unwrap();
+    assert_eq!(restored.id, original.id);
+    let inferred = || NoteWrite {
+        body: Some("# Inferred title\n\nUseful preview".into()),
+        tags: Some(vec!["#Work".into()]),
+        ..Default::default()
+    };
+    let created = write("create", inferred());
+    assert_eq!(created.title, "Inferred title");
+    assert_eq!(created.tags, ["work"]);
+    let again = write("create", inferred());
+    assert_eq!(created.id, again.id);
+    let (total, page) = list_notes(&store, &projects, 1, 1).unwrap();
+    assert_eq!(total, 2);
+    assert_eq!(page.len(), 1);
     let unscoped = store
         .upsert_note(&NoteUpsert {
             id: "global-note".into(),
@@ -255,25 +208,16 @@ fn operator_notes_support_desktop_ids_partial_updates_empty_bodies_and_paginatio
             ..Default::default()
         })
         .unwrap();
-    let edited = notes_action(
-        &store,
-        caller.id,
+    let edited = write(
         "global-edit",
-        "notes.write",
-        &json!({"id":unscoped.id,"title":"Still global"}),
-        &["/project".into()],
-    )
-    .unwrap();
-    assert!(edited["sourceCwd"].is_null());
-    assert!(notes_action(
-        &store,
-        caller.id,
-        "read",
-        "notes.read",
-        &json!({"id":original.id}),
-        &["/other".into()]
-    )
-    .is_err());
+        NoteWrite {
+            id: Some(unscoped.id),
+            title: Some("Still global".into()),
+            ..Default::default()
+        },
+    );
+    assert!(edited.source_cwd.is_none());
+    assert!(read_note(&store, &["/other".into()], &original.id).is_err());
 }
 
 #[test]
@@ -281,22 +225,18 @@ fn a_caller_without_a_session_creates_notes_without_provenance_and_idempotently(
     let store = Store::open_monocode(Path::new(":memory:")).unwrap();
     let projects = ["/project".to_owned()];
     let write = |request: &str| {
-        notes_action_for(
-            &store,
-            None,
-            request,
-            "notes.write",
-            &json!({"body":"# From a client"}),
-            &projects,
-        )
-        .unwrap()
+        let note = NoteWrite {
+            body: Some("# From a client".into()),
+            ..Default::default()
+        };
+        write_note(&store, None, request, note, &projects).unwrap()
     };
     let created = write("control:Claude Code:note-1");
-    assert!(created["id"].as_str().unwrap().starts_with("control-note-"));
-    assert!(created["sourceSessionId"].is_null());
-    assert_eq!(created["sourceCwd"], "/project");
-    assert_eq!(write("control:Claude Code:note-1")["id"], created["id"]);
-    assert_ne!(write("control:Claude Code:note-2")["id"], created["id"]);
+    assert!(created.id.starts_with("control-note-"));
+    assert!(created.source_session_id.is_none());
+    assert_eq!(created.source_cwd.as_deref(), Some("/project"));
+    assert_eq!(write("control:Claude Code:note-1").id, created.id);
+    assert_ne!(write("control:Claude Code:note-2").id, created.id);
 }
 
 #[test]

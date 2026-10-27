@@ -71,7 +71,7 @@ pub(crate) fn pin(window: &Window, title_bar_height: f32) {
     }
 }
 
-fn ns_window(window: &Window) -> Option<objc2::rc::Retained<NSWindow>> {
+pub(crate) fn ns_window(window: &Window) -> Option<objc2::rc::Retained<NSWindow>> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
     let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
         return None;

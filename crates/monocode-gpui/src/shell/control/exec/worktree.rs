@@ -30,9 +30,10 @@ impl Shell {
     pub(super) fn control_worktree_list(
         &self,
         input: &ProjectInput,
+        caller: &CallerKind,
         cx: &App,
     ) -> Result<Exec, ControlError> {
-        let project = self.control_local_project(input.project.as_deref())?;
+        let project = self.control_local_project_for(caller, input.project.as_deref(), cx)?;
         Ok(Exec::Later(cx.background_executor().spawn(async move {
             let snapshot =
                 monocode_core::git::snapshot(std::path::Path::new(&project)).map_err(git_error)?;
@@ -57,9 +58,10 @@ impl Shell {
     pub(super) fn control_worktree_create(
         &self,
         input: WorktreeCreateInput,
+        caller: &CallerKind,
         cx: &App,
     ) -> Result<Exec, ControlError> {
-        let project = self.control_local_project(input.project.as_deref())?;
+        let project = self.control_local_project_for(caller, input.project.as_deref(), cx)?;
         let branch = input.branch.trim().to_owned();
         let base = input
             .base

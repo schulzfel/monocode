@@ -1,5 +1,6 @@
 //! Monos: the app's standing assistants. Clients can list them, open one's
-//! tab and message its chat; memory, soul, habits and artifacts stay inside.
+//! tab and message its chat. A Mono's memory, soul, habits, artifacts and
+//! cards are its own: only its chat and habit runs reach them (`mono_*`).
 use crate::{Hints, Operation, Scope, ops::dispatch::MAX_PROMPT_BYTES};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

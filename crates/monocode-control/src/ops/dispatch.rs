@@ -50,10 +50,12 @@ pub struct SessionStart;
 pub struct SessionStartInput {
     /// What the agent should do (at most 240,000 bytes).
     pub prompt: String,
-    /// A local project's path or key; the current project when absent.
+    /// A local project's path or key; when absent, the calling agent
+    /// session's project, or for other clients the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
-    /// The provider, for example `claude` or `codex`; the app's default when absent.
+    /// The provider, for example `claude` or `codex`; when absent, the
+    /// calling agent session's, or for other clients the app's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     /// A model id from `model_list`.
@@ -65,7 +67,8 @@ pub struct SessionStartInput {
     /// Other model settings by id, as `model_list`'s models allow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_settings: Option<BTreeMap<String, String>>,
-    /// The access mode; the app's default for new chats when absent.
+    /// The access mode; when absent, the calling agent session's, or for
+    /// other clients the app's default for new chats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<AccessMode>,
     /// `current` (default) or `worktree`.
@@ -86,9 +89,18 @@ pub struct SessionStartInput {
     /// `tab` (default), `right` or `down`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<Placement>,
-    /// The open session pane to place beside; the project's focused one when absent.
+    /// The open session pane to place beside; when absent, the calling
+    /// agent session's own pane, or for other clients the project's focused one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub beside_session_id: Option<i64>,
+    /// The session's title (at most 160 bytes, trimmed); the prompt's first
+    /// 160 characters when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Report back when the session completes. Only a Mono's chat can ask
+    /// for that; anyone else is refused with `invalid_input`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_on_complete: Option<bool>,
 }
 
 /// The started session.
@@ -123,10 +135,14 @@ impl Operation for SessionStart {
     const TITLE: &'static str = "Start session";
     const SUBJECT: &'static [&'static str] = &["prompt", "project"];
     const SCOPE: Scope = Scope::Dispatch;
-    const DESCRIPTION: &'static str = "Start a new agent session in a local MonoCode project with a prompt, optionally choosing the harness, model, effort, access mode and a new or existing worktree. Pass a `requestId` so a retry returns the same session. Follow it with session_wait.";
+    const DESCRIPTION: &'static str = "Start a new agent session in a local MonoCode project with a prompt, optionally choosing the harness, model, effort, access mode and a new or existing worktree. Started by an agent session, it inherits that session's project, harness, account, model settings and access unless the call names others. Pass a `requestId` so a retry returns the same session. Follow it with session_wait.";
     const HINTS: Hints = Hints::CHANGE;
     type Input = SessionStartInput;
     type Output = SessionStartOutput;
+
+    fn project_slot(input: &mut SessionStartInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
 
     fn summary(output: &SessionStartOutput) -> String {
         format!(
@@ -186,6 +202,16 @@ pub struct SessionSendInput {
     /// While a turn runs: `queue` (default) or `steer`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<SendMode>,
+    /// Send only into an idle session whose composer and saved draft are
+    /// empty; otherwise fail with `session_busy` and keep its draft. One that
+    /// is not loaded yet gets the message once it has loaded. A Mono's send
+    /// does not look at the saved draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_idle: Option<bool>,
+    /// Report back when the turn completes. Only a Mono's chat can ask for
+    /// that; anyone else is refused with `invalid_input`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_on_complete: Option<bool>,
 }
 
 /// Where the message went.
@@ -205,8 +231,9 @@ impl Operation for SessionSend {
     const TITLE: &'static str = "Send to session";
     const SUBJECT: &'static [&'static str] = &["prompt", "sessionId"];
     const SCOPE: Scope = Scope::Dispatch;
-    const DESCRIPTION: &'static str = "Send a follow-up message to a session. An idle session starts a turn; a working one queues it, or with mode `steer` hands it to the running turn when the harness supports that. Pass a `requestId` so a retry is not sent twice.";
+    const DESCRIPTION: &'static str = "Send a follow-up message to a session. An idle session starts a turn; a working one queues it, or with mode `steer` hands it to the running turn when the harness supports that. With `ifIdle` it is sent only into an idle session without a draft. Pass a `requestId` so a retry is not sent twice.";
     const HINTS: Hints = Hints::CHANGE;
+    const NOT_ON_SELF: bool = true;
     const LOCAL_ONLY: bool = true;
     type Input = SessionSendInput;
     type Output = SessionSendOutput;

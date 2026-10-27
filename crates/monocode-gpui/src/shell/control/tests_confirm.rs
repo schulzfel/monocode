@@ -57,7 +57,7 @@ fn send_as(
                 Request::Call {
                     caller: client.into(),
                     request_id: request.map(str::to_owned),
-                    command,
+                    command: Box::new(command),
                     reply,
                 },
                 window,

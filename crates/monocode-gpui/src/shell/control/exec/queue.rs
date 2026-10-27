@@ -44,9 +44,10 @@ impl Shell {
     pub(super) fn control_queue_list(
         &mut self,
         id: i64,
+        caller: &CallerKind,
         cx: &mut Context<Self>,
     ) -> Result<QueueListOutput, ControlError> {
-        self.control_session(id, cx)?;
+        self.control_readable_for(caller, id, cx)?;
         let Some(view) = self.sessions.get(&id) else {
             // A chat that is not open sends nothing; its saved queue waits.
             return Ok(QueueListOutput {

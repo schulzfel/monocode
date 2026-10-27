@@ -9,7 +9,9 @@ use monocode_control::{
     CONFIRM_TIMEOUT, Command, Hints, Operation, Scope, catalog, hints_of,
     ops::{
         app::{AppInfo, AppInfoOutput, DataMode},
+        automation::AutomationUpsertInput,
         model::{ModelList, ModelListOutput, ModelSummary, ProviderModels},
+        notes::NotesWriteInput,
         project::{ProjectList, ProjectListOutput},
         queue::QueueEditInput,
     },
@@ -20,7 +22,7 @@ use std::time::Duration;
 
 /// Every operation in registry order: its scope, annotations and whether
 /// the person confirms each call.
-const OPERATIONS: [(&str, Scope, Hints, bool); 65] = [
+const OPERATIONS: [(&str, Scope, Hints, bool); 81] = [
     ("app_info", Scope::Read, Hints::READ, false),
     ("model_list", Scope::Read, Hints::READ, false),
     ("project_list", Scope::Read, Hints::READ, false),
@@ -101,6 +103,22 @@ const OPERATIONS: [(&str, Scope, Hints, bool); 65] = [
     ("mono_list", Scope::Read, Hints::READ, false),
     ("mono_open", Scope::Navigate, Hints::IDEMPOTENT, false),
     ("mono_send", Scope::Dispatch, Hints::CHANGE, false),
+    ("mono_memory_read", Scope::Read, Hints::READ, false),
+    ("mono_memory_search", Scope::Read, Hints::READ, false),
+    ("mono_memory_add", Scope::Manage, Hints::CHANGE, false),
+    ("mono_memory_replace", Scope::Manage, Hints::CHANGE, false),
+    ("mono_memory_remove", Scope::Manage, Hints::DISCARD, false),
+    ("mono_soul_read", Scope::Read, Hints::READ, false),
+    ("mono_soul_update", Scope::Manage, Hints::IDEMPOTENT, false),
+    ("mono_habit_list", Scope::Read, Hints::READ, false),
+    ("mono_habit_add", Scope::Manage, Hints::CHANGE, false),
+    ("mono_habit_update", Scope::Manage, Hints::IDEMPOTENT, false),
+    ("mono_habit_run", Scope::Dispatch, Hints::CHANGE, false),
+    ("mono_habit_remove", Scope::Manage, Hints::DISCARD, false),
+    ("mono_artifact_list", Scope::Read, Hints::READ, false),
+    ("mono_artifact_read", Scope::Read, Hints::READ, false),
+    ("mono_artifact_write", Scope::Manage, Hints::CHANGE, false),
+    ("mono_card_post", Scope::Dispatch, Hints::CHANGE, false),
 ];
 
 #[test]
@@ -138,8 +156,10 @@ fn the_catalog_lists_every_operation_once_with_its_scope_annotations_and_confirm
             ("git_discard", Scope::Vcs),
             ("git_push", Scope::Vcs),
             ("automation_delete", Scope::Destructive),
+            ("mono_memory_remove", Scope::Manage),
+            ("mono_habit_remove", Scope::Manage),
         ],
-        "archiving closes a pane, removing or editing a queued message discards the person's text"
+        "archiving closes a pane, removing or editing a queued message discards the person's text, and a Mono may forget its own entries and habits"
     );
     assert!(
         entries.iter().all(|d| !d.name.contains("approv")),
@@ -241,13 +261,15 @@ fn session_targets_and_their_rules_are_declared_with_each_operation() {
     assert_eq!(
         not_on_self,
         [
+            "session_send",
             "session_wait",
             "session_stop",
             "session_configure",
+            "session_draft",
             "session_archive",
             "session_delete"
         ],
-        "a session may not stop, wait on, reconfigure, archive or delete itself"
+        "a session may not message, stop, wait on, reconfigure, draft into, archive or delete itself"
     );
     assert_eq!(
         local_only,
@@ -272,6 +294,51 @@ fn session_targets_and_their_rules_are_declared_with_each_operation() {
         ],
         "remote sessions are read-only to clients"
     );
+}
+
+/// The operations whose absent `project` means the current project, which
+/// the app fills in with an agent session's own project; an update by id
+/// keeps the project it has.
+#[test]
+fn project_defaults_are_declared_with_each_operation() {
+    let mut defaulted = Vec::new();
+    for mut command in commands() {
+        let name = command.name();
+        if let Some(slot) = command.project_slot() {
+            *slot = Some("/work/monocode".into());
+            defaulted.push(name);
+            let wire = serde_json::to_value(&command).unwrap();
+            assert_eq!(wire["input"]["project"], "/work/monocode", "{name}");
+        }
+    }
+    assert_eq!(
+        defaulted,
+        [
+            "session_list",
+            "session_start",
+            "folder_list",
+            "worktree_list",
+            "worktree_create",
+            "search_project",
+            "notes_write",
+            "git_stage",
+            "git_unstage",
+            "git_commit",
+            "git_discard",
+            "git_push",
+            "automation_upsert"
+        ]
+    );
+    let mut update = Command::NotesWrite(NotesWriteInput {
+        id: Some("n1".into()),
+        ..NotesWriteInput::default()
+    });
+    assert!(update.project_slot().is_none(), "a note keeps its project");
+    let mut change = Command::AutomationUpsert(AutomationUpsertInput {
+        automation_id: Some("a1".into()),
+        ..AutomationUpsertInput::default()
+    });
+    assert!(change.project_slot().is_none(), "so does an automation");
 }
 
 #[test]
@@ -326,8 +393,12 @@ fn schema_snapshots_name_the_published_fields() {
     );
     assert_eq!(
         field_names(&entry("model_list").output_schema),
-        ["providers"]
+        ["accessModes", "providers"]
     );
+    let models = serde_json::to_string(&entry("model_list").output_schema).unwrap();
+    for field in ["settings", "defaultValue", "options", "value", "label"] {
+        assert!(models.contains(&format!("\"{field}\"")), "{field}");
+    }
     assert_eq!(
         field_names(&entry("project_list").input_schema),
         ["cursor", "limit"]
@@ -375,10 +446,12 @@ fn summaries_are_one_line_and_check_the_output_type() {
             models: vec![ModelSummary {
                 id: "sonnet".into(),
                 name: "Sonnet".into(),
+                settings: Vec::new(),
             }],
             omitted: 3,
             error: None,
         }],
+        access_modes: Vec::new(),
     };
     let text = summarize("model_list", &serde_json::to_value(&models).unwrap()).unwrap();
     assert_eq!(

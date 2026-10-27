@@ -15,14 +15,25 @@ pub(super) struct Watched {
     _observers: Vec<Subscription>,
 }
 
-/// Whether `caller` may still receive events: control is on and the client
-/// still holds the scope. Checked before every delivery and whenever
-/// Settings changes the policy; the error is what the connection is told.
-fn may_follow(policy: &Policy, caller: &CallerKind) -> Result<(), ControlError> {
-    caller::authorize(policy, caller, Topic::SCOPE, "Following resources").map(drop)
-}
-
 impl Shell {
+    /// Whether `caller` may still receive events: control is on and the
+    /// client still holds the scope, or the session still exists, or the
+    /// Mono still calls from its session. Checked before every delivery,
+    /// whenever Settings changes the policy and when a session is deleted;
+    /// the error is what the connection is told.
+    fn may_follow(&self, caller: &CallerKind, cx: &App) -> Result<(), ControlError> {
+        self.control_scope(caller, Topic::SCOPE, "Following resources", cx)
+            .map(drop)
+    }
+
+    /// Runs `work` on the hub, with [`may_follow`](Self::may_follow) at hand.
+    fn with_hub<T>(&mut self, work: impl FnOnce(&mut hub::Hub, &Self) -> T) -> T {
+        let mut hub = std::mem::take(&mut self.control.hub);
+        let result = work(&mut hub, self);
+        self.control.hub = hub;
+        result
+    }
+
     /// Follows `topics` for `connection` and answers with them.
     pub(super) fn control_subscribe(
         &mut self,
@@ -45,9 +56,12 @@ impl Shell {
         events: Events,
         cx: &mut Context<Self>,
     ) -> Result<(), ControlError> {
-        self.control_scope(&caller, Scope::Read, "Following resources")?;
+        // A session's credential may stand for a Mono; who it is now decides.
+        let caller = self.resolve_caller(&caller, cx)?;
+        self.control_scope(&caller, Scope::Read, "Following resources", cx)?;
         for topic in topics {
             self.control_topic_target(topic, cx)?;
+            self.mono_topic(&caller, topic, cx)?;
         }
         let new = self
             .control
@@ -74,12 +88,37 @@ impl Shell {
         let _ = reply.send(Ok(serde_json::json!({ "topics": [] })));
     }
 
-    /// After Settings changed the policy: tells each follower that may no
-    /// longer follow why, closing its connection, and forgets it.
-    pub(super) fn control_refuse_followers(&mut self, cx: &mut Context<Self>) {
-        let Control { hub, policy, .. } = &mut self.control;
-        hub.refuse(|caller| may_follow(policy, caller));
+    /// After Settings changed the policy or a session was deleted: tells
+    /// each follower that may no longer follow why, closing its connection,
+    /// and forgets it.
+    pub(in crate::shell) fn control_refuse_followers(&mut self, cx: &mut Context<Self>) {
+        let app: &App = cx;
+        self.with_hub(|hub, shell| hub.refuse(|caller| shell.may_follow(caller, app)));
         self.watch_control_sessions(cx);
+    }
+
+    /// Whether `caller` may follow `topic`: a Mono only follows its assigned
+    /// projects and their sessions (§5 step 9); anyone else any topic.
+    fn mono_topic(&self, caller: &CallerKind, topic: &Topic, cx: &App) -> Result<(), ControlError> {
+        let mono = match caller {
+            CallerKind::Mono { mono, .. } => self.caller_mono(mono, cx),
+            CallerKind::Session(_) | CallerKind::External(_) => return Ok(()),
+        };
+        let project = match topic {
+            Topic::ProjectSessions { project } => Some(project.clone()),
+            other => other
+                .session()
+                .filter(|id| self.session_summaries.contains_key(id))
+                .map(|id| self.session_metadata(id, cx).summary.cwd.clone()),
+        };
+        match (mono, project) {
+            (Some(mono), Some(project)) if !mono.works_on(&project) => Err(ControlError::new(
+                ErrorCode::ScopeDenied,
+                format!("{project} is not one of this Mono's assigned projects"),
+            )),
+            (Some(_), _) => Ok(()),
+            (None, _) => Err(ControlError::new(ErrorCode::NotFound, caller::MONO_GONE)),
+        }
     }
 
     /// Forgets what a closed connection followed.
@@ -156,10 +195,11 @@ impl Shell {
                 changed.push(topic);
             }
         }
-        let Control { hub, policy, .. } = &mut self.control;
-        let followers = hub.followers();
-        let owed = hub.deliver(&changed, |caller| may_follow(policy, caller));
-        let left = hub.followers() != followers;
+        let followers = self.control.hub.followers();
+        let app: &App = cx;
+        let owed = self
+            .with_hub(|hub, shell| hub.deliver(&changed, |caller| shell.may_follow(caller, app)));
+        let left = self.control.hub.followers() != followers;
         if owed {
             self.schedule_control_flush(cx);
         }

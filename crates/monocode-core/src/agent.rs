@@ -131,6 +131,10 @@ pub struct Settings {
     pub disable_claude_hooks: bool,
     #[serde(skip)]
     pub environment: std::collections::HashMap<String, String>,
+    /// Transport-only: the turn is an orchestration worker's, which keeps
+    /// its lead's scoped workflow and gets no MonoCode tools.
+    #[serde(skip)]
+    pub orchestration_worker: bool,
     #[serde(skip)]
     pub mono: Option<MonoContext>,
     #[serde(skip)]

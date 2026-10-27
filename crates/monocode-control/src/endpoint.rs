@@ -1,7 +1,10 @@
 //! Where the app listens for one data folder: a socket file in the folder's
 //! own `control/` subfolder on macOS and Linux, a named pipe derived from the
 //! folder on Windows. The data folder itself may be shared with the desktop
-//! (Tauri) app, so only the subfolder is made private.
+//! (Tauri) app, so only the subfolder is made private. A data folder too deep
+//! for a socket path gets a private folder named after it instead, in the
+//! user's runtime folder on Linux or else under the temporary folder, so the
+//! app and its relays still agree.
 use crate::ControlError;
 use sha2::{Digest, Sha256};
 use std::{
@@ -35,19 +38,49 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// The endpoint of the data folder `dir`, the folder holding the
-    /// database the app opened.
+    /// database the app opened. On macOS and Linux, when the socket path in
+    /// `dir` is longer than the platform allows, the socket lives in
+    /// a private folder named after `dir` instead (`fallback_dir`): on
+    /// Linux in the user's runtime folder (`XDG_RUNTIME_DIR`) when the
+    /// session has one, else under the temporary folder (`TMPDIR`, else
+    /// `/tmp`; `fallback_root`).
     ///
     /// # Errors
-    /// `invalid_input` when the socket path is longer than the platform allows.
+    /// `invalid_input` when the fallback path is too long as well, or the
+    /// fallback folder exists but is not a private folder of the data
+    /// folder's owner.
     pub fn for_data_dir(dir: &Path) -> Result<Self, ControlError> {
+        // Only Linux has a runtime folder of the user's own to prefer.
+        #[cfg(unix)]
+        let temp = fallback_root(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .filter(|_| cfg!(target_os = "linux"))
+                .map(PathBuf::from)
+                .as_deref(),
+            &std::env::temp_dir(),
+        );
+        #[cfg(windows)]
+        let temp = std::env::temp_dir();
+        Self::for_data_dir_in(dir, &temp)
+    }
+    /// [`for_data_dir`](Self::for_data_dir), with `temp` as the folder the
+    /// fallback folder goes in. Named pipes have no length limit, so
+    /// Windows ignores `temp`.
+    ///
+    /// # Errors
+    /// As [`for_data_dir`](Self::for_data_dir).
+    pub fn for_data_dir_in(dir: &Path, temp: &Path) -> Result<Self, ControlError> {
         #[cfg(unix)]
         return Ok(Self {
-            path: socket_path(dir)?,
+            path: fallback::socket_path_in(dir, temp)?,
         });
         #[cfg(windows)]
-        return Ok(Self {
-            name: pipe_name(dir),
-        });
+        {
+            let _ = temp;
+            Ok(Self {
+                name: pipe_name(dir),
+            })
+        }
     }
     /// The socket file.
     #[cfg(unix)]
@@ -122,10 +155,50 @@ pub fn socket_path(dir: &Path) -> Result<PathBuf, ControlError> {
 pub fn pipe_name(dir: &Path) -> String {
     let folder = dir.to_string_lossy();
     let folder = folder.trim_end_matches(['/', '\\']).to_lowercase();
-    let digest = Sha256::digest(folder.as_bytes());
     let mut name = String::from("monocode-control-");
+    push_digest(&mut name, folder.as_bytes());
+    name
+}
+
+/// Appends 16 hex digits of a SHA-256 of `bytes` to `name`.
+fn push_digest(name: &mut String, bytes: &[u8]) {
+    let digest = Sha256::digest(bytes);
     for byte in &digest[..8] {
         let _ = write!(name, "{byte:02x}");
     }
-    name
 }
+
+/// The folder the fallback folder ([`fallback_dir`]) goes in: the user's
+/// own runtime folder `runtime` (`$XDG_RUNTIME_DIR`, which only Linux
+/// passes) when it is an absolute path, since no other user may create
+/// anything there; else the temporary folder `temp` (`$TMPDIR`, else
+/// `/tmp`).
+#[cfg(unix)]
+#[must_use]
+pub fn fallback_root(runtime: Option<&Path>, temp: &Path) -> PathBuf {
+    runtime
+        .filter(|folder| folder.is_absolute())
+        .unwrap_or(temp)
+        .to_path_buf()
+}
+
+/// The folder in `temp` ([`fallback_root`]) that holds the socket of the
+/// data folder `dir` when `<dir>/control/` is too deep: `monocode-` and 16
+/// hex digits of a SHA-256 of the folder's path. The app makes it `0700`
+/// when it binds.
+#[cfg(unix)]
+#[must_use]
+pub fn fallback_dir(dir: &Path, temp: &Path) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = dir.as_os_str().as_bytes();
+    let trimmed = match bytes.iter().rposition(|b| *b != b'/') {
+        Some(last) => &bytes[..=last],
+        None => bytes,
+    };
+    let mut name = String::from("monocode-");
+    push_digest(&mut name, trimmed);
+    temp.join(name)
+}
+
+#[cfg(unix)]
+mod fallback;

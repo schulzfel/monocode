@@ -83,6 +83,9 @@ impl Shell {
         settings.turns.clear();
         settings.environment.clear();
         settings.attachments.clear();
+        // Workers keep this scoped workflow: no MonoCode tools of their own,
+        // decided with the settings their first turn starts from.
+        settings.orchestration_worker = true;
         let provider = conversation.summary.provider.clone();
         let tasks = plan
             .tasks
@@ -370,6 +373,7 @@ impl Shell {
                                     run.tasks[ix].state = State::Running;
                                 }
                                 this.sessions[&id].update(cx, |v, cx| {
+                                    v.set_orchestration_worker(true);
                                     v.install_transfer(settings, Some(prompt), cx)
                                 });
                             }
@@ -445,6 +449,71 @@ mod tests {
         window
             .update(cx, |shell, _, cx| {
                 assert!(shell.sessions.values().all(|v| !v.read(cx).busy))
+            })
+            .unwrap();
+    }
+
+    /// A worker is registered only after its chat exists and just before its
+    /// first turn starts; the settings that turn starts from already say it
+    /// is a worker, so it gets no MonoCode tools (`runtime::app_control`).
+    #[gpui::test]
+    fn workers_start_their_first_turn_without_monocode_tools(cx: &mut TestAppContext) {
+        let (window, _, lead) = crate::shell::tests::window(cx);
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/c/orch1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap().display().to_string();
+        window
+            .update(cx, |shell, _, cx| {
+                shell.sessions[&lead].update(cx, |v, cx| {
+                    // No provider process ever starts: without a worktree, a
+                    // turn is refused before it launches, the workers' too.
+                    let settings = Settings {
+                        worktree_removed: true,
+                        ..Default::default()
+                    };
+                    v.install_transfer(settings, None, cx);
+                    v.summary.cwd = dir.clone();
+                });
+                let task = Task {
+                    id: "task-0".into(),
+                    title: "Inspect".into(),
+                    prompt: "Inspect and report".into(),
+                    files: vec!["src".into()],
+                    depends_on: Vec::new(),
+                };
+                let plan = Plan {
+                    title: "Review".into(),
+                    summary: String::new(),
+                    tasks: vec![task],
+                };
+                shell.start_orchestration(lead, plan, cx);
+                assert!(shell.orchestrations[&lead].settings.orchestration_worker);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let worker = window
+            .update(cx, |shell, _, cx| {
+                let worker = shell.orchestration_summaries[&lead].tasks[0]
+                    .session
+                    .unwrap();
+                assert!(shell.orchestration_worker(worker));
+                let view = shell.sessions[&worker].read(cx);
+                assert!(view.orchestration_worker(), "the shell marked its chat");
+                assert!(
+                    view.settings.orchestration_worker,
+                    "the settings its first turn starts from say so"
+                );
+                assert!(!view.busy, "and nothing ran");
+                worker
+            })
+            .unwrap();
+        // Reopened later, its chat is marked again.
+        window
+            .update(cx, |shell, _, cx| {
+                shell.sessions.remove(&worker);
+                let view = shell.ensure_session(worker, cx).unwrap();
+                assert!(view.read(cx).orchestration_worker());
+                assert!(!shell.sessions[&lead].read(cx).orchestration_worker());
             })
             .unwrap();
     }

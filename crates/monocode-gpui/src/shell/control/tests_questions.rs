@@ -280,7 +280,7 @@ fn queue_operations_list_edit_steer_and_remove_through_the_cards_actions(cx: &mu
             let request = Request::Call {
                 caller: CLIENT.into(),
                 request_id: None,
-                command,
+                command: Box::new(command),
                 reply,
             };
             shell.handle_control(request, window, cx);

@@ -85,6 +85,10 @@ pub trait Operation {
     /// Whether its target session ([`Self::target_session`]) must be local:
     /// remote sessions are read-only to clients.
     const LOCAL_ONLY: bool = false;
+    /// Whether only a Mono's chat or habit run may call it: it acts on the
+    /// calling Mono's own memory, soul, habits, artifacts or chat. Every
+    /// other caller is refused.
+    const MONO_ONLY: bool = false;
     /// The arguments.
     type Input: Serialize + DeserializeOwned + JsonSchema + Debug + Clone + PartialEq + Send;
     /// The result.
@@ -102,6 +106,15 @@ pub trait Operation {
     /// The existing session this call acts on (its `sessionId`), if it
     /// names one. [`Self::NOT_ON_SELF`] and [`Self::LOCAL_ONLY`] apply to it.
     fn target_session(input: &Self::Input) -> Option<i64> {
+        let _ = input;
+        None
+    }
+
+    /// The input's `project`, when an absent one means the current project:
+    /// the app fills it in for callers that have a project of their own, so
+    /// an agent session's call acts on its session's project. `None` when
+    /// the operation, or this input (an update by id), has no such default.
+    fn project_slot(input: &mut Self::Input) -> Option<&mut Option<String>> {
         let _ = input;
         None
     }
@@ -133,6 +146,9 @@ pub struct Descriptor {
     /// Whether the person confirms each call in the app
     /// ([`Operation::CONFIRM`]).
     pub confirmed: bool,
+    /// Whether only a Mono's chat or habit run may call it
+    /// ([`Operation::MONO_ONLY`]); relays list it only to a Mono.
+    pub mono_only: bool,
     /// The input's JSON Schema (root type `object`). An operation that
     /// changes something also accepts [`REQUEST_ID`].
     pub input_schema: Map<String, Value>,
@@ -166,6 +182,7 @@ impl Descriptor {
             description: Op::DESCRIPTION,
             hints: Op::HINTS,
             confirmed: Op::CONFIRM,
+            mono_only: Op::MONO_ONLY,
             input_schema,
             output_schema: object_schema::<Op::Output>(),
         }

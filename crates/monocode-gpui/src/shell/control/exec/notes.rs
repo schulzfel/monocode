@@ -1,6 +1,8 @@
 //! `notes_list`, `notes_read` and `notes_write`: Operator's notes calls
 //! (`app_access::write_note` and its siblings), on a worker, scoped to the
-//! app's local projects.
+//! app's local projects. An agent session sees its own project's notes and
+//! those of no project, as Operator's threads do; a Mono those of its
+//! assigned projects and of no project, as its old app actions did.
 use super::*;
 use monocode_control::ops::{
     self,
@@ -35,10 +37,30 @@ fn note_error(error: NoteError) -> ControlError {
 }
 
 impl Shell {
-    /// The local projects notes may belong to: `project`, or all of them.
-    fn control_note_projects(&self, project: Option<&str>) -> Result<Vec<String>, ControlError> {
-        Ok(match project {
-            Some(project) => vec![self.control_local_project(Some(project))?],
+    /// The local projects notes may belong to: `project`; else a session
+    /// caller's own project, a Mono's assigned projects, or for other
+    /// clients all of them.
+    fn control_note_projects(
+        &self,
+        project: Option<&str>,
+        caller: &CallerKind,
+        cx: &App,
+    ) -> Result<Vec<String>, ControlError> {
+        if let Some(project) = project {
+            return Ok(vec![self.control_local_project_for(
+                caller,
+                Some(project),
+                cx,
+            )?]);
+        }
+        if let CallerKind::Mono { mono, .. } = caller {
+            let mono = self
+                .caller_mono(mono, cx)
+                .ok_or_else(|| ControlError::new(ErrorCode::NotFound, caller::MONO_GONE))?;
+            return Ok(mono.projects.clone());
+        }
+        Ok(match self.caller_project(caller, cx) {
+            Some(own) => vec![own],
             None => self
                 .workspace
                 .projects
@@ -65,6 +87,7 @@ impl Shell {
     pub(super) fn control_notes_list(
         &self,
         input: &NotesListInput,
+        caller: &Caller,
         cx: &App,
     ) -> Result<Exec, ControlError> {
         let limit = ops::limit(input.limit, DEFAULT_NOTES_PER_PAGE, MAX_NOTES_PER_PAGE)?;
@@ -74,7 +97,7 @@ impl Shell {
                 .parse::<usize>()
                 .map_err(|_| ControlError::invalid_input("cursor is not valid for this list"))?,
         };
-        let projects = self.control_note_projects(input.project.as_deref())?;
+        let projects = self.control_note_projects(input.project.as_deref(), caller.caller, cx)?;
         Ok(self.control_notes(
             move |store| {
                 let (total, notes) = list_notes(store, &projects, limit, offset)?;
@@ -101,9 +124,10 @@ impl Shell {
     pub(super) fn control_notes_read(
         &self,
         input: &NotesReadInput,
+        caller: &Caller,
         cx: &App,
     ) -> Result<Exec, ControlError> {
-        let projects = self.control_note_projects(None)?;
+        let projects = self.control_note_projects(None, caller.caller, cx)?;
         let id = input.id.clone();
         Ok(self.control_notes(move |store| read_note(store, &projects, &id).map(note), cx))
     }
@@ -114,15 +138,20 @@ impl Shell {
         caller: &Caller,
         cx: &App,
     ) -> Result<Exec, ControlError> {
-        let projects = if input.id.is_some() {
-            self.control_note_projects(None)?
-        } else {
-            vec![self.control_local_project(input.project.as_deref())?]
+        let projects = match (&input.id, input.project.as_deref(), caller.caller) {
+            (Some(_), ..) => self.control_note_projects(None, caller.caller, cx)?,
+            // A Mono's defaults leave a new note without a project only
+            // when it has none: the note then belongs to no project.
+            (None, None, CallerKind::Mono { .. }) => Vec::new(),
+            (None, project, _) => {
+                vec![self.control_local_project_for(caller.caller, project, cx)?]
+            }
         };
         let request = caller.request_key();
-        // A session's notes record it as their source, as Operator's do.
+        // A session's notes record it as their source, as Operator's do; a
+        // Mono's record the chat or habit run it wrote them from.
         let session = match caller.caller {
-            CallerKind::Session(id) => Some(*id),
+            CallerKind::Session(id) | CallerKind::Mono { session: id, .. } => Some(*id),
             CallerKind::External(_) => None,
         };
         let write = NoteWrite {

@@ -67,7 +67,7 @@ pub(super) struct Target {
     provider: Kind,
     model: Option<String>,
     cwd: String,
-    settings: Settings,
+    pub(super) settings: Settings,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Thread {
@@ -1794,7 +1794,7 @@ fn paint_question_burst(
 }
 
 impl Conversation {
-    fn btw_target(&self, cx: &App) -> Option<Target> {
+    pub(super) fn btw_target(&self, cx: &App) -> Option<Target> {
         if !self.history_ready()
             || self.settings.mono.is_some()
             || self.settings.worktree_removed
@@ -1827,8 +1827,7 @@ impl Conversation {
         if !supported(provider) {
             return None;
         }
-        let mut settings = self.settings.clone();
-        settings.environment.extend(self.app_environment.clone());
+        let mut settings = self.request_settings();
         if provider != Kind::from_id(&self.summary.provider) {
             settings.account = crate::accounts::get(cx)
                 .map(|center| center.read(cx).selected(provider, self.execution_cwd()))

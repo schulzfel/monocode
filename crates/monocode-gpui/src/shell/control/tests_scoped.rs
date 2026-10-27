@@ -15,7 +15,7 @@ use monocode_control::{
         automation::{AutomationSetEnabledInput, AutomationUpsertInput},
         configure::SessionConfigureInput,
         dispatch::SessionSendInput,
-        organize::SessionRenameInput,
+        organize::{SessionArchiveInput, SessionRenameInput},
         project::ProjectListInput,
         queue::QueueItemInput,
         session::{SessionInput, SessionListInput},
@@ -48,7 +48,7 @@ fn ask(
             let request = Request::Call {
                 caller: CLIENT.into(),
                 request_id: None,
-                command,
+                command: Box::new(command),
                 reply,
             };
             shell.handle_control(request, window, cx);
@@ -217,7 +217,7 @@ fn removing_a_queued_message_is_destructive_and_confirmed(cx: &mut TestAppContex
     let send = Command::SessionSend(SessionSendInput {
         session_id: b,
         prompt: "Also update the docs".into(),
-        mode: None,
+        ..SessionSendInput::default()
     });
     call(window, CLIENT, None, send, cx).unwrap();
     let message = window
@@ -272,7 +272,10 @@ fn a_working_session_is_not_archived(cx: &mut TestAppContext) {
             .unwrap()
     };
     busy(true, cx);
-    let archive = Command::SessionArchive(SessionInput { session_id: b });
+    let archive = Command::SessionArchive(SessionArchiveInput {
+        session_id: b,
+        stop: None,
+    });
     let refused = call(window, CLIENT, None, archive.clone(), cx).unwrap_err();
     assert_eq!(
         (refused.code, refused.retryable),

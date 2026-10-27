@@ -122,10 +122,7 @@ pub(super) fn present(call: &ToolCall, fallback_cwd: Option<&str>) -> ToolPresen
         .or_else(|| number(preview, &["startLine"]))
         .or_else(|| location(desktop).and_then(|v| number(v, &["line"])));
     let title = string(desktop, &["title"]).unwrap_or_else(|| call.name.clone());
-    let kind = string(desktop, &["kind"])
-        .filter(|kind| kind != "other")
-        .or_else(|| string(preview, &["kind"]))
-        .unwrap_or_default();
+    let kind = semantic_kind(desktop);
     if let Some(shown) = super::mcp::present(call, &input, &kind) {
         return shown;
     }
@@ -338,6 +335,16 @@ fn inputs<'a>(value: &'a Value, depth: usize, out: &mut Vec<&'a Value>) {
         inputs(&value[key], depth + 1, out);
     }
 }
+/// A call's semantic kind from its display metadata `desktop`: ACP's
+/// `kind`, else a desktop preview's; empty when neither names one, and for
+/// ACP's catch-all `other`.
+pub(super) fn semantic_kind(desktop: &Value) -> String {
+    string(desktop, &["kind"])
+        .filter(|kind| kind != "other")
+        .or_else(|| string(&desktop["preview"], &["kind"]))
+        .unwrap_or_default()
+}
+
 fn string(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         value[*key]

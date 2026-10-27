@@ -33,6 +33,8 @@ pub use caption::{APP_LAUNCH, APP_LAUNCH_TITLE, Caption, SET_FIELDS, caption};
 pub use client::{Client, Notice, NoticeSink};
 pub use command::{Command, Registered, catalog, hints_of, summarize};
 pub use endpoint::{Endpoint, MAX_SOCKET_PATH, SOCKET_DIR, SOCKET_FILE, pipe_name, socket_path};
+#[cfg(unix)]
+pub use endpoint::{fallback_dir, fallback_root};
 pub use error::{ControlError, ErrorCode};
 pub use frame::{ClientInfo, Grant};
 pub use operation::{CONFIRM_TIMEOUT, Descriptor, Hints, Operation, REQUEST_ID, valid_tool_name};

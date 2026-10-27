@@ -125,9 +125,18 @@ fn the_relay_speaks_for_the_session_its_environment_names() {
         ("MONOCODE_CONTROL_SESSION", "7"),
         ("MONOCODE_CONTROL_TOKEN", "c0ffee"),
     ]);
-    let (endpoint, credential) = session::from_env(full).unwrap().unwrap();
-    assert_eq!(endpoint.describe(), "/data/control/monocode-control.sock");
+    let relay = session::from_env(full).unwrap().unwrap();
+    assert_eq!(
+        relay.endpoint.describe(),
+        "/data/control/monocode-control.sock"
+    );
+    let credential = relay.credential;
     assert_eq!((credential.id, credential.token.as_str()), (7, "c0ffee"));
+    assert_eq!(
+        relay.role,
+        monocode_mcp::Role::Session,
+        "no role is a session"
+    );
     let broken = env(&[
         (
             "MONOCODE_CONTROL_ENDPOINT",
@@ -144,4 +153,62 @@ fn the_relay_speaks_for_the_session_its_environment_names() {
     );
     let partial = env(&[("MONOCODE_CONTROL_TOKEN", "c0ffee")]);
     assert!(session::from_env(partial).unwrap().is_err());
+}
+
+/// `MONOCODE_CONTROL_ROLE=mono` makes a session relay list a Mono's own
+/// tools; any other value is a session, and without a credential the role
+/// names nobody: an external client stays one.
+#[test]
+fn the_relay_reads_its_role_with_its_credential_only() {
+    let env = |pairs: &'static [(&'static str, &'static str)]| {
+        move |key: &str| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    };
+    let role = |pairs| session::from_env(env(pairs)).unwrap().unwrap().role;
+    let credential = [
+        (
+            "MONOCODE_CONTROL_ENDPOINT",
+            "/data/control/monocode-control.sock",
+        ),
+        ("MONOCODE_CONTROL_SESSION", "7"),
+        ("MONOCODE_CONTROL_TOKEN", "c0ffee"),
+    ];
+    let with = |value: &'static str| -> &'static [(&'static str, &'static str)] {
+        let mut pairs = credential.to_vec();
+        pairs.push(("MONOCODE_CONTROL_ROLE", value));
+        pairs.leak()
+    };
+    assert_eq!(role(with("mono")), monocode_mcp::Role::Mono);
+    assert_eq!(role(with("session")), monocode_mcp::Role::Session);
+    assert_eq!(role(with("admin")), monocode_mcp::Role::Session);
+    assert!(session::from_env(env(&[("MONOCODE_CONTROL_ROLE", "mono")])).is_none());
+}
+
+/// A data folder too deep for its socket path: the relay an MCP client
+/// starts finds the same fallback socket that the window binds, in Linux's
+/// `XDG_RUNTIME_DIR` or under `TMPDIR` (`monocode-control/tests/
+/// socket_fallback.rs` pins the folder).
+#[test]
+fn the_relay_and_the_window_agree_on_the_socket_of_a_deep_data_folder() {
+    let dir = scratch("p8").join("a-data-folder-too-deep-for-its-own-control-socket");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(monocode_control::socket_path(&dir).is_err(), "too deep");
+    let database = store_with(&dir, None);
+    let store = Store::open_monocode(&database).unwrap();
+    let window = store.data_dir().map(Endpoint::for_data_dir);
+    assert_eq!(Some(endpoint(&database)), window, "what the window binds");
+    let folder = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|_| cfg!(target_os = "linux"))
+        .map(PathBuf::from)
+        .filter(|folder| folder.is_absolute())
+        .unwrap_or_else(std::env::temp_dir);
+    assert_eq!(
+        endpoint(&database),
+        Endpoint::for_data_dir_in(&dir, &folder),
+        "the fallback in the user's runtime folder or the temporary folder"
+    );
 }

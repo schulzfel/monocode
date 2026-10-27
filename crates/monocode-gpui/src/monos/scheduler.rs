@@ -1357,9 +1357,9 @@ impl Monos {
         });
         cx.spawn(async move|this,cx|{let result=work.await;let _=this.update(cx,|this,cx|{
             match result{Err(e)=>{this.active_run=None;this.error=Some(e);},Ok((summary,mono,mut settings,habit))=>{
-                let session=summary.id;let view=cx.new(|cx|Conversation::new(summary,this.store.clone(),cx));let root=this.root.clone();let env=this.bridge.as_ref().map(|b|b.environment(session)).unwrap_or_default();
+                let session=summary.id;let view=cx.new(|cx|Conversation::new(summary,this.store.clone(),cx));let root=this.root.clone();
                 settings.access=AccessMode::FullAccess;settings.internal_message=true;settings.mono=None;settings.environment.clear();
-                view.update(cx,|v,cx|{v.install_transfer(settings,None,cx);v.configure_mono(mono,root,env,cx);});
+                view.update(cx,|v,cx|{v.install_transfer(settings,None,cx);v.configure_mono(mono,root,cx);});
                 this.observations.push(cx.subscribe(&view,move|this,_,_:&SessionChanged,cx|this.habit_changed(session,cx)));
                 this.running.insert(session,RunningHabit{mono:target.clone(),habit:habit.id.clone(),view:view.clone(),started:now_ms(),launched:now_ms(),failure:None,waiting_since:None,cards:Vec::new(),mailbox:Vec::new()});this.active_run=Some(session);
                 this.roster.hidden_sessions.push(session);

@@ -39,7 +39,7 @@ impl Shell {
             .retryable(true);
             return self.finish_control(call, Err(error), cx);
         }
-        let checked = self.control_check(&call.command, cx);
+        let checked = self.control_check(&call.caller, &call.command, cx);
         self.control.next_approval += 1;
         let id = self.control.next_approval;
         let caller = call.caller.clone();
@@ -138,9 +138,9 @@ impl Shell {
         }
         // The grant or the target may have changed while the person decided.
         let checked = self
-            .control_grant(caller, &waiting.call.command)
+            .control_grant(caller, &waiting.call.command, cx)
             .and_then(|grant| {
-                self.control_target(&waiting.call.command, cx)?;
+                self.control_target(caller, &waiting.call.command, cx)?;
                 Ok(grant)
             });
         match checked {

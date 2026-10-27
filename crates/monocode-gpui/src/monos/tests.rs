@@ -2,15 +2,15 @@ use super::*;
 use gpui::{TestAppContext, WindowHandle};
 use monocode_core::store::Store;
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex, mpsc};
-struct Setup {
-    window: WindowHandle<Shell>,
-    manager: Entity<Monos>,
-    id: String,
-    project: String,
-    session: i64,
-    root: PathBuf,
-    store: Database,
+use std::sync::{Arc, Mutex};
+pub(crate) struct Setup {
+    pub(crate) window: WindowHandle<Shell>,
+    pub(crate) manager: Entity<Monos>,
+    pub(crate) id: String,
+    pub(crate) project: String,
+    pub(crate) session: i64,
+    pub(crate) root: PathBuf,
+    pub(crate) store: Database,
 }
 
 #[gpui::test]
@@ -307,8 +307,15 @@ fn detail_pages_slide_over_the_overview_and_back_without_recreating_content(
         );
     }
 }
-fn setup(cx: &mut TestAppContext) -> Setup {
-    let dir = std::env::temp_dir().join(format!("native-monos-{}", mono::new_id()));
+pub(crate) fn setup(cx: &mut TestAppContext) -> Setup {
+    // A short folder under the checkout's target/, as the control tests use,
+    // so the window's control socket fits sun_path whatever TMPDIR is.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/c");
+    std::fs::create_dir_all(&root).unwrap();
+    let dir = root
+        .canonicalize()
+        .unwrap()
+        .join(format!("mono-{}", &mono::new_id()[..12]));
     std::fs::create_dir_all(&dir).unwrap();
     let project = dir.to_string_lossy().to_string();
     let store = Arc::new(Mutex::new(Store::open(&dir.join("native.sqlite")).unwrap()));
@@ -350,29 +357,24 @@ fn setup(cx: &mut TestAppContext) -> Setup {
         store,
     }
 }
+/// Old action `action` from the Mono's main chat, through the control
+/// pipeline as `tests_parity_mono::act` calls it; a refusal as its message.
 fn call(
     s: &Setup,
     request: &str,
     action: &str,
     input: Value,
     cx: &mut TestAppContext,
-) -> mpsc::Receiver<Result<Value, String>> {
-    let (reply, rx) = mpsc::channel();
-    let call = mono::bridge::Call {
-        session: s.session,
-        request_id: request.into(),
-        action: action.into(),
+) -> Result<Value, String> {
+    tests_parity_mono::chat(s, cx);
+    tests_parity_mono::act(
+        s,
+        tests_parity_mono::Caller::Chat,
+        action,
         input,
-        reply,
-    };
-    let handle: gpui::AnyWindowHandle = s.window.into();
-    handle
-        .update(cx, |_, w, cx| {
-            s.manager.update(cx, |m, cx| m.app_call(call, w, cx))
-        })
-        .unwrap();
-    cx.run_until_parked();
-    rx
+        request,
+        cx,
+    )
 }
 #[gpui::test]
 fn settings_match_react_dialog_and_left_navigation_geometry(cx: &mut TestAppContext) {
@@ -547,8 +549,6 @@ fn note_actions_preserve_tags_when_updating_the_body(cx: &mut TestAppContext) {
         json!({"title":"QA note","body":"First","tags":["work","mono"]}),
         cx,
     )
-    .try_recv()
-    .unwrap()
     .unwrap();
     let updated = call(
         &s,
@@ -557,8 +557,6 @@ fn note_actions_preserve_tags_when_updating_the_body(cx: &mut TestAppContext) {
         json!({"id":note["id"],"title":"QA note","body":"Second"}),
         cx,
     )
-    .try_recv()
-    .unwrap()
     .unwrap();
     assert_eq!(updated["tags"], json!(["work", "mono"]));
     assert_eq!(updated["body"], "Second");
@@ -628,28 +626,15 @@ fn app_actions_are_project_scoped_and_mutation_retries_are_idempotent(cx: &mut T
             json!({"project":"/not-assigned"}),
             cx
         )
-        .try_recv()
-        .unwrap()
         .is_err()
     );
     let input = json!({"name":"Morning digest","instructions":"Summarize changes without editing","schedule":{"kind":"daily","time":"09:00"}});
-    let first = call(&s, "habit", "habits.add", input.clone(), cx)
-        .try_recv()
-        .unwrap()
-        .unwrap();
-    let retry = call(&s, "habit", "habits.add", input, cx)
-        .try_recv()
-        .unwrap()
-        .unwrap();
+    let first = call(&s, "habit", "habits.add", input.clone(), cx).unwrap();
+    let retry = call(&s, "habit", "habits.add", input, cx).unwrap();
     assert_eq!(first, retry);
     assert_eq!(habits::load(&s.root, &s.id).unwrap().len(), 1);
-    assert!(
-        call(&s, "habit", "habits.add", json!({"name":"different"}), cx)
-            .try_recv()
-            .unwrap()
-            .is_err()
-    );
-    let start=call(&s,"draft","sessions.start",json!({"project":s.project,"prompt":"Review the project","title":"Review draft","draft":true}),cx).try_recv().unwrap().unwrap();
+    assert!(call(&s, "habit", "habits.add", json!({"name":"different"}), cx).is_err());
+    let start=call(&s,"draft","sessions.start",json!({"project":s.project,"prompt":"Review the project","title":"Review draft","draft":true}),cx).unwrap();
     let child = start["sessionId"].as_i64().unwrap();
     cx.update(|cx| {
         let m = s.manager.read(cx);
@@ -681,23 +666,34 @@ fn sidebar_hidden_launches_still_list_in_the_mono_panel_after_a_restart(cx: &mut
         json!({"project":s.project,"prompt":"Review quietly","title":"Quiet review","draft":true}),
         cx,
     )
-    .try_recv()
-    .unwrap()
     .unwrap();
     let child = started["sessionId"].as_i64().unwrap();
     let owner = cx.update(|cx| s.manager.read(cx).owner.upgrade().unwrap());
     cx.update(|cx| {
         assert!(s.manager.read(cx).hidden_session(child));
         owner.update(cx, |shell, _| shell.mono_forget_session(child));
-        assert!(!owner.read(cx).mono_session_views(cx).iter().any(|v| v.id == child));
+        assert!(
+            !owner
+                .read(cx)
+                .mono_session_views(cx)
+                .iter()
+                .any(|v| v.id == child)
+        );
     });
     s.manager.update(cx, |m, cx| m.configure_chat(&s.id, cx));
     cx.run_until_parked();
     cx.update(|cx| {
         let views = owner.read(cx).mono_session_views(cx);
-        let view = views.iter().find(|v| v.id == child).expect("the launch lists again");
+        let view = views
+            .iter()
+            .find(|v| v.id == child)
+            .expect("the launch lists again");
         assert!(view.title.contains("Quiet review"), "{}", view.title);
-        assert!(owner.update(cx, |shell, cx| shell.mono_ensure_session(child, cx)).is_some());
+        assert!(
+            owner
+                .update(cx, |shell, cx| shell.mono_ensure_session(child, cx))
+                .is_some()
+        );
         assert!(s.manager.read(cx).hidden_session(child));
     });
 }
@@ -711,8 +707,6 @@ fn mono_app_launch_visibility_can_be_toggled_and_survives_roster_reload(cx: &mut
         json!({"project":s.project,"prompt":"Review quietly","draft":true}),
         cx,
     )
-    .try_recv()
-    .unwrap()
     .unwrap();
     let child = started["sessionId"].as_i64().unwrap();
     cx.update(|cx| assert!(s.manager.read(cx).hidden_session(child)));
@@ -1583,7 +1577,10 @@ fn habits_and_documents_search_like_sessions(cx: &mut TestAppContext) {
             s.manager.update(cx, |m, cx| {
                 m.settings = None;
                 m.overview_tab = OverviewTab::Habits;
-                m.habits = vec![habit("digest", "Morning digest"), habit("report", "Weekly report")];
+                m.habits = vec![
+                    habit("digest", "Morning digest"),
+                    habit("report", "Weekly report"),
+                ];
                 let documents = &mut m.roster.get_mut(&s.id).unwrap().documents;
                 documents.push(document("plan", "Launch plan"));
                 documents.push(document("summary", "Release summary"));
@@ -1604,7 +1601,9 @@ fn habits_and_documents_search_like_sessions(cx: &mut TestAppContext) {
     assert!(visual.debug_bounds("mono-habit-digest").is_some());
     assert!(visual.debug_bounds("mono-habit-report").is_none());
 
-    s.manager.update(visual, |m, cx| m.select_overview(OverviewTab::Documents, cx));
+    s.manager.update(visual, |m, cx| {
+        m.select_overview(OverviewTab::Documents, cx)
+    });
     visual.run_until_parked();
     assert!(visual.debug_bounds("mono-document-plan").is_some());
     search(visual, "mono-document-search", "release");

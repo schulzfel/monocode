@@ -1,5 +1,6 @@
 mod accounts;
 mod answers;
+mod app_control;
 mod approvals;
 mod attachment_drop;
 mod background_tasks;
@@ -41,7 +42,7 @@ use crate::{
 };
 pub(crate) use accounts::UsageResumed;
 pub(crate) use answers::AnswerRefused;
-pub(crate) use control::reply as control_reply;
+pub(crate) use control::{ExternalDraft, reply as control_reply};
 use gpui::{
     AnyElement, Context, CursorStyle, Entity, EventEmitter, Focusable, MouseButton, Role,
     SharedString, StyleRefinement, Subscription, Window, canvas, div, prelude::*, px,
@@ -164,7 +165,9 @@ pub(crate) struct Conversation {
     attaching: bool,
     file_drag: bool,
     attachment_error: Option<String>,
-    app_environment: std::collections::HashMap<String, String>,
+    /// Whether this chat is an orchestration worker's, whose turns get no
+    /// MonoCode tools; the shell says so.
+    orchestration_worker: bool,
     /// The running turn's policy, independent of the next composer's mode.
     pub(crate) app_read_only: bool,
     planning_orchestration: bool,
@@ -175,6 +178,8 @@ pub(crate) struct Conversation {
     loaded: bool,
     history_unloaded: bool,
     history_actions: std::collections::VecDeque<history::HistoryAction>,
+    /// Messages and drafts from control clients among `history_actions`.
+    external_waiting: usize,
     pending_search: Option<(usize, String)>,
     loading: bool,
     pub(crate) busy: bool,
@@ -598,7 +603,7 @@ impl Conversation {
             attaching: false,
             file_drag: false,
             attachment_error: None,
-            app_environment: Default::default(),
+            orchestration_worker: false,
             app_read_only: false,
             planning_orchestration: false,
             orchestration_plan: None,
@@ -608,6 +613,7 @@ impl Conversation {
             loaded: false,
             history_unloaded: false,
             history_actions: Default::default(),
+            external_waiting: 0,
             pending_search: None,
             loading: false,
             busy: false,
@@ -813,7 +819,6 @@ impl Conversation {
                     }
                     Err(e) => this.status = SessionStatus::error(e),
                 }
-                this.mono_flush_external(cx);
                 cx.emit(SessionChanged);
                 cx.notify();
             });
@@ -1073,7 +1078,7 @@ impl Conversation {
             .try_global::<crate::settings::Preferences>()
             .is_some_and(|p| !p.claude_hooks);
         settings.model = self.model.clone();
-        settings.environment.extend(self.app_environment.clone());
+        settings.orchestration_worker |= self.orchestration_worker;
         if settings.remote_action.as_ref().is_none_or(|action| {
             (action["type"] == "send"
                 && action["draftBlockId"].is_null()
@@ -1369,7 +1374,6 @@ impl Conversation {
                             this.save_settings(cx);
                             this.refresh_git(cx);
                             this.run_history_actions(cx);
-                            this.mono_flush_external(cx);
                             cx.emit(SessionChanged);
                         } else if incoming_notification_input
                             || mono_queue_changed

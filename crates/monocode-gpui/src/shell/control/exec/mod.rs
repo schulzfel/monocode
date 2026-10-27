@@ -11,8 +11,10 @@ mod layout;
 mod lifecycle;
 pub(super) mod model;
 mod mono;
+mod mono_own;
 mod notes;
 mod organize;
+mod placement;
 mod project;
 pub(super) mod question;
 mod queue;
@@ -80,6 +82,44 @@ impl Caller<'_> {
     }
 }
 
+/// What the Monos are told once an app caller's call succeeds.
+enum MonosAfter {
+    /// Session `0` was stopped, archived or deleted: no Mono reports on it.
+    Dismiss(i64),
+    /// Mono `0` changed its own files: its panels read them again.
+    FilesWritten(String),
+}
+
+impl MonosAfter {
+    /// What `caller`'s `command` tells the Monos once it succeeds (§7.2): a
+    /// stop, archive or delete by an app caller dismisses every Mono's
+    /// report on the session (only after it succeeded, F-2), and a Mono's
+    /// own change reloads its files (MO-18).
+    fn of(caller: &CallerKind, command: &Command) -> Option<Self> {
+        let target = match command {
+            Command::SessionStop(input) => Some(input.session_id),
+            Command::SessionArchive(input) => Some(input.session_id),
+            Command::SessionDelete(input) => Some(input.session_id),
+            _ => None,
+        };
+        match caller {
+            CallerKind::External(_) => None,
+            CallerKind::Session(_) => target.map(Self::Dismiss),
+            CallerKind::Mono { mono, .. } => target.map(Self::Dismiss).or_else(|| {
+                (command.mono_only() && !command.hints().read_only)
+                    .then(|| Self::FilesWritten(mono.clone()))
+            }),
+        }
+    }
+
+    fn apply(&self, monos: &Entity<crate::monos::Monos>, cx: &mut App) {
+        monos.update(cx, |monos, cx| match self {
+            Self::Dismiss(id) => monos.dismiss_launches(*id, cx),
+            Self::FilesWritten(mono) => monos.files_written(mono, cx),
+        });
+    }
+}
+
 impl Shell {
     pub(super) fn exec_control(
         &mut self,
@@ -89,8 +129,38 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Exec {
-        self.exec_command(grant, caller, command, window, cx)
-            .unwrap_or_else(|error| Exec::Ready(Err(error)))
+        let after = MonosAfter::of(caller.caller, &command);
+        let exec = self
+            .exec_command(grant, caller, command, window, cx)
+            .unwrap_or_else(|error| Exec::Ready(Err(error)));
+        match (after, self.monos.clone()) {
+            (Some(after), Some(monos)) => Self::then_monos(exec, after, monos, cx),
+            _ => exec,
+        }
+    }
+
+    /// `exec`, telling the Monos `after` once it succeeds.
+    fn then_monos(
+        exec: Exec,
+        after: MonosAfter,
+        monos: Entity<crate::monos::Monos>,
+        cx: &mut Context<Self>,
+    ) -> Exec {
+        match exec {
+            Exec::Ready(result) => {
+                if result.is_ok() {
+                    after.apply(&monos, cx);
+                }
+                Exec::Ready(result)
+            }
+            Exec::Later(task) => Exec::Later(cx.spawn(async move |_, cx| {
+                let result = task.await;
+                if result.is_ok() {
+                    cx.update(|cx| after.apply(&monos, cx));
+                }
+                result
+            })),
+        }
     }
 
     fn exec_command(
@@ -103,41 +173,56 @@ impl Shell {
     ) -> Result<Exec, ControlError> {
         match command {
             Command::AppInfo(_) => ready(Ok(self.control_app_info(grant))),
-            Command::ModelList(input) => self.control_model_list(input, cx),
+            Command::ModelList(input) => self.control_model_list(input, caller, cx),
             Command::ProjectList(input) => ready(self.control_project_list(&input)),
             Command::ProjectSelect(input) => ready(self.control_project_select(&input, window, cx)),
             Command::ProjectAdd(input) => ready(self.control_project_add(&input, window, cx)),
             Command::WorkspaceRead(_) => ready(Ok(self.control_workspace(cx))),
-            Command::SessionList(input) => ready(self.control_session_list(&input, cx)),
-            Command::SessionRead(input) => self.control_session_read(input, cx),
-            Command::SessionStatus(input) => self.control_session_status(input.session_id, cx),
+            Command::SessionList(input) => {
+                ready(self.control_session_list_for(&input, caller.caller, cx))
+            }
+            Command::SessionRead(input) => self.control_session_read(input, caller.caller, cx),
+            Command::SessionStatus(input) => {
+                self.control_session_status(input.session_id, caller.caller, cx)
+            }
             Command::SessionStart(input) => self.control_session_start(&input, caller, cx),
-            Command::SessionSend(input) => ready(self.control_session_send(input, cx)),
-            Command::SessionWait(input) => self.control_session_wait(&input, cx),
+            Command::SessionSend(input) => {
+                ready(self.control_session_send(input, caller.caller, cx))
+            }
+            Command::SessionWait(input) => self.control_session_wait(&input, caller.caller, cx),
             Command::SessionStop(input) => ready(self.control_session_stop(input.session_id, cx)),
             Command::TabOpen(input) => ready(self.control_tab_open(&input, window, cx)),
             Command::TabFocus(input) => ready(self.control_tab_focus(&input, window, cx)),
             Command::TabClose(input) => ready(self.control_tab_close(&input, window, cx)),
             Command::SessionConfigure(input) => ready(self.control_session_configure(input, cx)),
-            Command::SessionDraft(input) => ready(self.control_session_draft(&input, cx)),
+            Command::SessionDraft(input) => self.control_session_draft(&input, cx),
             Command::SessionRename(input) => ready(self.control_session_rename(&input, cx)),
+            Command::SessionArchive(input) if input.stop == Some(true) => {
+                self.control_session_stop_archive(input.session_id, cx)
+            }
             Command::SessionArchive(input) => {
                 self.control_session_archive(input.session_id, true, cx)
             }
             Command::SessionRestore(input) => {
                 self.control_session_archive(input.session_id, false, cx)
             }
-            Command::FolderList(input) => ready(self.control_folder_list(&input)),
+            Command::FolderList(input) => {
+                ready(self.control_folder_list(&input, caller.caller, cx))
+            }
             Command::SessionMove(input) => self.control_session_move(input, cx),
             Command::QuestionList(input) => ready(self.control_question_list(&input, cx)),
             Command::QuestionAnswer(input) => ready(self.control_question_answer(&input, cx)),
-            Command::QueueList(input) => ready(self.control_queue_list(input.session_id, cx)),
+            Command::QueueList(input) => {
+                ready(self.control_queue_list(input.session_id, caller.caller, cx))
+            }
             Command::QueueRemove(input) => ready(self.control_queue_remove(&input, cx)),
             Command::QueueSteer(input) => ready(self.control_queue_steer(&input, cx)),
             Command::QueueResume(input) => ready(self.control_queue_resume(input.session_id, cx)),
             Command::QueueEdit(input) => ready(self.control_queue_edit(input, cx)),
-            Command::WorktreeList(input) => self.control_worktree_list(&input, cx),
-            Command::WorktreeCreate(input) => self.control_worktree_create(input, cx),
+            Command::WorktreeList(input) => self.control_worktree_list(&input, caller.caller, cx),
+            Command::WorktreeCreate(input) => {
+                self.control_worktree_create(input, caller.caller, cx)
+            }
             Command::ProjectUpdate(input) => ready(self.control_project_update(&input, cx)),
             Command::ProjectArchive(input) => {
                 ready(self.control_project_archive(&input, window, cx))
@@ -150,17 +235,17 @@ impl Shell {
             Command::SettingsRead(_) => ready(Ok(self.control_settings_read())),
             Command::SettingsUpdate(input) => ready(self.control_settings_update(input, cx)),
             Command::SearchSessions(input) => self.control_search_sessions(&input, cx),
-            Command::SearchProject(input) => self.control_search_project(input, cx),
-            Command::NotesList(input) => self.control_notes_list(&input, cx),
-            Command::NotesRead(input) => self.control_notes_read(&input, cx),
+            Command::SearchProject(input) => self.control_search_project(input, caller.caller, cx),
+            Command::NotesList(input) => self.control_notes_list(&input, caller, cx),
+            Command::NotesRead(input) => self.control_notes_read(&input, caller, cx),
             Command::NotesWrite(input) => self.control_notes_write(&input, caller, cx),
-            Command::ChangesRead(input) => self.control_changes_read(&input, cx),
+            Command::ChangesRead(input) => self.control_changes_read(&input, caller.caller, cx),
             Command::SessionCompact(input) => {
                 ready(self.control_session_compact(input.session_id, cx))
             }
             Command::SessionHandoff(input) => self.control_session_handoff(input, caller, cx),
             Command::SessionDelete(input) => {
-                self.control_session_delete(input.session_id, window, cx)
+                self.control_session_delete(input.session_id, caller.caller, window, cx)
             }
             Command::ProjectDelete(input) => self.control_project_delete(&input, window, cx),
             Command::GitStage(input) => self.control_git_stage(&input, cx),
@@ -179,6 +264,22 @@ impl Shell {
             Command::MonoList(_) => ready(self.control_mono_list(cx)),
             Command::MonoOpen(input) => ready(self.control_mono_open(&input.mono_id, window, cx)),
             Command::MonoSend(input) => ready(self.control_mono_send(input, cx)),
+            command @ (Command::MonoMemoryRead(_)
+            | Command::MonoMemorySearch(_)
+            | Command::MonoMemoryAdd(_)
+            | Command::MonoMemoryReplace(_)
+            | Command::MonoMemoryRemove(_)
+            | Command::MonoSoulRead(_)
+            | Command::MonoSoulUpdate(_)
+            | Command::MonoHabitList(_)
+            | Command::MonoHabitAdd(_)
+            | Command::MonoHabitUpdate(_)
+            | Command::MonoHabitRun(_)
+            | Command::MonoHabitRemove(_)
+            | Command::MonoArtifactList(_)
+            | Command::MonoArtifactRead(_)
+            | Command::MonoArtifactWrite(_)
+            | Command::MonoCardPost(_)) => self.control_mono_own(command, caller.caller, cx),
         }
     }
 }

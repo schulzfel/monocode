@@ -248,7 +248,10 @@ empty.
 ## Agents inside MonoCode
 
 Every local agent session MonoCode runs gets this MCP server, named
-`monocode`, with no setup and no approval prompt. An agent asked to "add
+`monocode`, with no setup and no approval prompt, when its provider takes MCP
+servers; the others get the same tools through a command (below).
+Orchestration workers get neither: they keep their lead's scoped workflow,
+and a worker's hello is refused with `scope_denied`. An agent asked to "add
 ~/github.com/repost to MonoCode" calls `project_add`; the server's
 instructions tell it that it runs inside MonoCode and that projects, tabs,
 sessions and settings are managed through these tools, never by editing
@@ -259,6 +262,7 @@ MonoCode's database or files.
 MONOCODE_CONTROL_ENDPOINT=…/control/monocode-control.sock
 MONOCODE_CONTROL_SESSION=42                   # the session the relay speaks for
 MONOCODE_CONTROL_TOKEN=…                      # that session's credential for this app run
+MONOCODE_CONTROL_ROLE=session                 # mono for a Mono's chat and habit runs; a hint for the tool list
 ```
 
 A session holds every scope, and MonoCode asks
@@ -268,11 +272,19 @@ decided by the session's provider, as for any of its tools: Claude Code's
 auto-mode classifier or its approval prompt in supervised mode, Codex
 approvals, ACP permissions. Choose the session's access mode accordingly.
 
+A session in plan mode, on an orchestration lead's turn or with the
+read-only access mode may call only the read-only tools (hint `read-only`
+in the tool reference); anything else is refused with `scope_denied`
+("This thread's access policy allows read-only app actions."). The same
+holds for a Mono's chat and habit runs, and is checked on every call, so
+switching plan mode on mid-turn takes effect at once.
+
 | Provider | How the server reaches it |
 | --- | --- |
 | Claude Code | `--mcp-config` on its command line; the server inherits Claude's environment |
-| Codex | `-c mcp_servers.monocode.command/args/env_vars`; `env_vars` forwards the three variables by name |
-| Cursor, Grok, Fx, Hermes, Antigravity, Devin (ACP) | `mcpServers` of `session/new` and `session/load`, with the variables in its `env` list |
+| Codex | `-c mcp_servers.monocode.command/args/env_vars`; `env_vars` forwards the four variables by name |
+| Cursor, Grok, Fx, Hermes, Antigravity, Devin (ACP) | `mcpServers` of `session/new` and `session/load` (and Antigravity's `session/resume`), with the variables in its `env` list |
+| Pi, OpenCode, Omp | No server: they take no MCP configuration. The session gets the same variables, and its agent runs the tools through `<this executable> app OPERATION --json JSON`, which also accepts the old dotted action names; `app help` lists them ([agent access](../agent-access.md)) |
 
 The relay says hello as `session:<id>` with the session's credential. The
 token is a digest of a secret made at app start and the session's id: it is
@@ -281,8 +293,9 @@ session a new one. A wrong token is refused with `scope_denied`, a session
 that no longer exists with `not_found`; neither falls back to the external
 approval. External clients cannot name themselves `session:…`.
 
-A session cannot `session_stop`, `session_archive`, `session_delete`,
-`session_configure` or `session_wait` its own session; those calls fail with
+A session cannot `session_send`, `session_draft`, `session_stop`,
+`session_archive`, `session_delete`, `session_configure` or `session_wait`
+its own session; those calls fail with
 `invalid_input`. Everything else is allowed, including the same calls on
 other sessions. The activity log in Settings lists a session's changes under
 its title, and sessions it starts record it as their starter
@@ -300,8 +313,9 @@ recorded as the provider made it.
 | Limitation | Why |
 | --- | --- |
 | Remote (`remote://`) sessions get no server | They run on another host, where neither the relay nor this socket exists |
-| OpenCode, Pi and Omp sessions get no server | Those providers take no MCP configuration from MonoCode |
-| A Grok or Fx session resumed in a new provider process gets no server | Their `session/resume` takes no MCP servers; the process that started the session keeps it |
+| OpenCode, Pi and Omp sessions get no server | Those providers take no MCP configuration from MonoCode; their agents use the `app` command instead |
+| A Grok or Fx session resumed in a new provider process gets no server | Their `session/resume` takes no MCP servers; the process that started the session keeps it. So their `/operator` instructions and a Mono's context name the `app` command, which works on every turn. Antigravity's resume passes the server again |
+| Orchestration workers get no server and no command | They keep their lead's scoped workflow |
 | Text-only turns, and Devin turns that send a native slash command, get no server | They run without MonoCode's additions, as for native visuals |
 
 ## Tool reference
@@ -388,7 +402,39 @@ says which (for example, turning an automation on needs `dispatch` besides
 | `app_launch` | (relay) | idempotent | no | Start MonoCode when it is not running, and wait up to 30 seconds until it can be controlled. |
 <!-- tools:end -->
 
-The table is checked against the catalog by
+### Tools for Monos
+
+A Mono's main chat and its habit runs also get these tools, on the calling
+Mono's own memory, soul, habits, artifacts and chat. MonoCode sets
+`MONOCODE_CONTROL_ROLE=mono` in their environment, and only a relay with
+that role lists them; the variable is a hint, not a permission. Every other
+caller, whatever its relay lists, is refused with `scope_denied` ("… is only
+available in a Mono's chat"), and a habit run may list its Mono's habits but
+not add, change, run or remove them ("A habit run cannot schedule more
+runs").
+
+<!-- mono-tools:start -->
+| Tool | Scope | Hints | Confirmed | Purpose |
+| --- | --- | --- | --- | --- |
+| `mono_memory_read` | `read` | read-only, idempotent | no | Read your memory (MEMORY.md), one of its topic notes, or the archive of entries that no longer fit, with the hash of its text. |
+| `mono_memory_search` | `read` | read-only, idempotent | no | Search your memory, its archive and its topic notes for entries containing every word of the query, optionally only those dated since a day or duration. |
+| `mono_memory_add` | `manage` | (none) | no | Remember a fact: it is appended to your memory (or a topic note) as a dated entry, with credentials redacted. |
+| `mono_memory_replace` | `manage` | (none) | no | Replace one entry of your memory: the entry `find` quotes is struck out as superseded today and the new fact is added after it. |
+| `mono_memory_remove` | `manage` | destructive, idempotent | no | Forget one entry of your memory: the live entry `find` quotes is deleted. |
+| `mono_soul_read` | `read` | read-only, idempotent | no | Read your soul (SOUL.md, your standing instructions) and the hash of its text, which mono_soul_update needs. |
+| `mono_soul_update` | `manage` | idempotent | no | Replace your soul (SOUL.md) with new text, only when asked. |
+| `mono_habit_list` | `read` | read-only, idempotent | no | List your habits: each one's name, instructions, schedule, whether it is on, its next run and its recent runs. |
+| `mono_habit_add` | `manage` (+ `dispatch`) | (none) | no | Add a habit, only after the person agreed: scheduled work that runs in a session of its own and reports back here; a quiet run replies NOTHING_TO_REPORT. |
+| `mono_habit_update` | `manage` (+ `dispatch`) | idempotent | no | Change a habit's name, instructions, schedule or whether it is on. |
+| `mono_habit_run` | `dispatch` | (none) | no | Run a habit now, whatever its schedule and even while it is off: its run starts at the next scheduler tick, within about ten seconds. |
+| `mono_habit_remove` | `manage` | destructive, idempotent | no | Delete a habit and its run history. |
+| `mono_artifact_list` | `read` | read-only, idempotent | no | List your artifacts (documents, HTML pages and Markdown you saved), optionally of one kind: id, kind, title, summary and when each was written, without bodies; mono_artifact_read returns one with its body. |
+| `mono_artifact_read` | `read` | read-only, idempotent | no | Read one of your artifacts with its body. |
+| `mono_artifact_write` | `manage` | (none) | no | Save a substantial report as an artifact (a document, HTML page or Markdown) with a title, summary and complete body, and post its card in your chat. |
+| `mono_card_post` | `dispatch` | (none) | no | Post a card in your chat, by `type`: `pr` (repo?, number, note?) shows a GitHub pull request with its live title, state and size; `session` (sessionId, note?) shows a session of an assigned project with its live state; `choices` (options) offers 1 to 4 replies the person sends with one click; `habit` (name, instructions, schedule) suggests a habit the person adds with one click. |
+<!-- mono-tools:end -->
+
+Both tables are checked against the catalog by
 `crates/monocode-mcp/tests/docs.rs`.
 
 ## Resources and subscriptions
@@ -453,7 +499,7 @@ with a `requestId`, is retried once on a fresh connection.
 | --- | --- |
 | HTTP request body | 4 MiB |
 | HTTP 2025-11-25 session without requests | ends after 5 minutes |
-| Control socket connections per app | 16 |
+| Control socket connections per app | 16 for clients and 256 for MonoCode's own sessions; at most 32 may wait to say hello |
 | Calls running per connection | 8 (more are refused, retryably) |
 | Request frame | 1 MiB |
 | Response frame | 4 MiB |
@@ -482,16 +528,23 @@ with a `requestId`, is retried once on a fresh connection.
 | macOS, Linux | Control socket `<data folder>/control/monocode-control.sock`; folder `0700`, socket `0600` |
 | Windows | Named pipe `monocode-control-<16 hex digits of the folder's SHA-256>` |
 
-A socket path longer than 103 bytes on macOS (107 on Linux) cannot be bound,
-and every call returns that error; choose a shorter data folder. The Windows
-named pipe is covered by CI only and has not been checked against a real
-Windows install.
+When the socket path in the data folder is longer than 103 bytes on macOS
+(107 on Linux), the app and the relay use
+`<folder>/monocode-<16 hex digits of the data folder's SHA-256>/monocode-control.sock`
+instead, with the same modes. `<folder>` is `$XDG_RUNTIME_DIR` on Linux when
+it is set to an absolute path, else `$TMPDIR`, else `/tmp`; macOS always uses
+`$TMPDIR`. An existing fallback folder is used only when
+it is a folder of the data folder's owner with mode `0700`; anything else is
+refused with an error that names it. When the fallback path is too long as
+well, every call returns that error; choose a shorter data folder. The
+Windows named pipe is covered by CI only and has not been checked against a
+real Windows install.
 
 Known Windows gaps, for a follow-up on a machine that builds for Windows:
 
 | Gap | Effect | Follow-up |
 | --- | --- | --- |
-| A connection that never says hello is not closed | Named pipes have no read timeout and `Connection::shutdown` does nothing there, so 16 such connections take every slot and lock all clients out until they hang up (on macOS and Linux the hello deadline of 10 s closes them) | Close a silent pipe from a watchdog with `CancelIoEx`, which needs one reviewed `unsafe` module in `transport/windows.rs` (`monocode-control` forbids `unsafe` today) |
+| A connection that never says hello is not closed | Named pipes have no read timeout and `Connection::shutdown` does nothing there, so 32 such connections take every hello slot and lock all clients out until they hang up (on macOS and Linux the hello deadline of 10 s closes them) | Close a silent pipe from a watchdog with `CancelIoEx`, which needs one reviewed `unsafe` module in `transport/windows.rs` (`monocode-control` forbids `unsafe` today) |
 | The relay does not check who owns the pipe | Another user who creates the pipe name before the app could answer the relay; the pipe's owner-only access list keeps others out only once the app holds the name | Check the server process's token owner (`GetNamedPipeServerProcessId`, `OpenProcessToken`) in that same module, or have the app write a token to the data folder that the welcome must carry |
 
 ## Limitations
@@ -505,7 +558,7 @@ Not built, by design or for now:
 | Commit-message generation | It spends model tokens on the person's account; `git_commit` takes the message |
 | Answering tool-permission approvals | Approvals stay with the person at the app; questions can be answered |
 | Remote projects | Changes, and reads that run in the project folder, fail with `remote_unsupported` |
-| Mono memory, soul, habits and artifacts | They stay inside the Mono; Monos can be listed, opened and messaged |
+| Mono memory, soul, habits and artifacts | Available to a Mono's own chat and habit runs only (Tools for Monos), never to external clients; they can list, open and message Monos |
 | Automation event triggers | Set them in the app; `automation_upsert` edits time schedules and keeps event triggers |
 
 Never exposed, whatever the scopes:

@@ -5,6 +5,8 @@ use std::collections::VecDeque;
 use std::sync::{atomic::AtomicUsize, OnceLock};
 mod client;
 mod events;
+#[cfg(all(test, unix))]
+mod tests;
 use client::Client;
 
 enum Wire {
@@ -167,11 +169,32 @@ fn command(request: &Request) -> Result<Command, String> {
     process::isolate(&mut command);
     Ok(command)
 }
+/// [`command`] for OpenCode v2's background service, which every session
+/// shares: without the session's MonoCode control variables
+/// (`app_mcp::CONTROL_ENV`), so the service never acts as one session.
+fn shared_command(request: &Request) -> Result<Command, String> {
+    let mut command = command(request)?;
+    for key in crate::app_mcp::CONTROL_ENV {
+        command.env_remove(key);
+    }
+    Ok(command)
+}
 fn exec(request: &Request, args: &[&str], cancel: &AtomicBool) -> Result<String, String> {
-    let mut child = command(request)?
-        .args(args)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    output_of(request, command(request)?, args, cancel)
+}
+/// [`exec`] of one of the background service's own commands
+/// ([`shared_command`]).
+fn service(request: &Request, args: &[&str], cancel: &AtomicBool) -> Result<String, String> {
+    output_of(request, shared_command(request)?, args, cancel)
+}
+/// What `command args…` printed, as `request`'s OpenCode, within 30 s.
+fn output_of(
+    request: &Request,
+    mut command: Command,
+    args: &[&str],
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    let mut child = command.args(args).spawn().map_err(|e| e.to_string())?;
     let _registration = process::register(child.id());
     let _account = crate::accounts::track(child.id(), request.kind, &request.settings.account);
     let stdout = child.stdout.take().unwrap();
@@ -269,17 +292,17 @@ fn connect(
 ) -> Result<(Client, Option<Server>), String> {
     let directory = request.cwd.to_string_lossy().into_owned();
     if v2 {
-        let mut url = exec(request, &["service", "status"], cancel)
+        let mut url = service(request, &["service", "status"], cancel)
             .ok()
             .and_then(|output| service_url(&output));
         if url.is_none() {
-            url = service_url(&exec(request, &["service", "start"], cancel)?);
+            url = service_url(&service(request, &["service", "start"], cancel)?);
             if url.is_none() {
-                url = service_url(&exec(request, &["service", "status"], cancel)?);
+                url = service_url(&service(request, &["service", "status"], cancel)?);
             }
         }
         let url = url.ok_or("OpenCode background service did not report a local URL.")?;
-        let password = exec(request, &["service", "get", "password"], cancel)?
+        let password = service(request, &["service", "get", "password"], cancel)?
             .trim()
             .to_owned();
         if password.is_empty() {

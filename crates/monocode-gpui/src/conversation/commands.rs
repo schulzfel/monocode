@@ -49,8 +49,7 @@ impl Conversation {
         }
         let kind = Kind::from_id(&self.summary.provider);
         self.attach_account(cx);
-        let mut settings = self.settings.clone();
-        settings.environment.extend(self.app_environment.clone());
+        let mut settings = self.request_settings();
         settings.disable_claude_hooks = cx
             .try_global::<crate::settings::Preferences>()
             .is_some_and(|preferences| !preferences.claude_hooks);

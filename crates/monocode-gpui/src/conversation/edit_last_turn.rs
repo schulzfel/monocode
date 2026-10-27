@@ -245,8 +245,7 @@ impl Conversation {
             return true;
         };
         self.attach_account(cx);
-        let mut settings = self.settings.clone();
-        settings.environment.extend(self.app_environment.clone());
+        let settings = self.request_settings();
         let request = provider::Request {
             kind,
             binary,

@@ -181,7 +181,15 @@ fn scheduling_a_prompt_also_needs_dispatch() {
         .filter(|d| !d.also.is_empty())
         .map(|d| d.name)
         .collect();
-    assert_eq!(others, ["automation_set_enabled", "automation_upsert"]);
+    assert_eq!(
+        others,
+        [
+            "automation_set_enabled",
+            "automation_upsert",
+            "mono_habit_add",
+            "mono_habit_update"
+        ]
+    );
     let enable = |enabled| {
         Command::AutomationSetEnabled(AutomationSetEnabledInput {
             automation_id: "a1".into(),

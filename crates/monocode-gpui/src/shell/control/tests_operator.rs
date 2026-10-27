@@ -1,9 +1,19 @@
+//! An agent session's old Operator actions, ported from the tests of the
+//! old in-app dispatch they were first written against: each action is
+//! translated as the `app` command translates it (`app_cli::legacy`) and
+//! called through the control pipeline as the session's relay calls it. The assertions are
+//! the old tests'; where the answer differs, a comment names the accepted
+//! change of the spec (§13). Worktrees, sends, stops and archives are in
+//! `tests_operator_ops`.
 use super::*;
+use crate::app_cli::legacy;
 use gpui::{TestAppContext, WindowHandle};
-use monocode_core::{agent::Settings, store::Store};
-use std::sync::mpsc;
+use monocode_control::{Command, session_caller_name};
+use monocode_core::agent::Settings;
+use serde_json::{Value, json};
 
-fn setup(cx: &mut TestAppContext) -> (WindowHandle<Shell>, i64, i64) {
+/// The fixture window, with `caller` as an Operator thread was set up.
+pub(super) fn setup(cx: &mut TestAppContext) -> (WindowHandle<Shell>, i64, i64) {
     let (window, other, caller) = crate::shell::tests::window(cx);
     window
         .update(cx, |shell, _, cx| {
@@ -22,7 +32,10 @@ fn setup(cx: &mut TestAppContext) -> (WindowHandle<Shell>, i64, i64) {
     cx.run_until_parked();
     (window, other, caller)
 }
-fn call(
+
+/// Old action `action` as session `caller` calls it on the control
+/// pipeline; a refusal as its message.
+pub(super) fn call(
     window: WindowHandle<Shell>,
     caller: i64,
     request: &str,
@@ -30,28 +43,20 @@ fn call(
     input: Value,
     cx: &mut TestAppContext,
 ) -> Result<Value, String> {
-    let (reply, result) = mpsc::channel();
-    window
-        .update(cx, |shell, window, cx| {
-            shell.handle_app_call(
-                Call {
-                    session: caller,
-                    request_id: request.into(),
-                    action: action.into(),
-                    input,
-                    reply,
-                },
-                window,
-                cx,
-            )
-        })
-        .unwrap();
-    cx.run_until_parked();
-    result
-        .try_recv()
-        .expect("the app action must settle after its writes")
+    let wire = legacy::translate(action, &input)?;
+    let command: Command = serde_json::from_value(wire).map_err(|e| e.to_string())?;
+    super::tests::call(
+        window,
+        &session_caller_name(caller),
+        Some(request),
+        command,
+        cx,
+    )
+    .map_err(|e| e.message)
 }
-fn launch(
+
+/// An unsent launch from `caller`, so no provider starts.
+pub(super) fn launch(
     window: WindowHandle<Shell>,
     caller: i64,
     request: &str,
@@ -83,22 +88,19 @@ fn submitted_operator_access_survives_the_composer_reset(cx: &mut TestAppContext
                 assert!(!view.settings.operator);
                 assert!(view.settings.operator_enabled);
             });
-            let (reply, _) = mpsc::channel();
-            shell
-                .authorize_app_call(
-                    &Call {
-                        session: caller,
-                        request_id: "after-submit".into(),
-                        action: "sessions.list".into(),
-                        input: json!({}),
-                        reply,
-                    },
-                    cx,
-                )
-                .unwrap();
         })
         .unwrap();
-    cx.run_until_parked();
+    assert!(
+        call(
+            window,
+            caller,
+            "after-submit",
+            "sessions.list",
+            json!({}),
+            cx
+        )
+        .is_ok()
+    );
     assert!(call(window, caller, "later", "sessions.list", json!({}), cx).is_ok());
     window
         .update(cx, |shell, _, cx| {
@@ -131,18 +133,18 @@ fn submitted_operator_access_survives_the_composer_reset(cx: &mut TestAppContext
         .unwrap();
 }
 
+/// C-2: every session may call without `/operator`, so an Operator mode
+/// picked but never sent is no longer refused ("Operator is not enabled for
+/// this thread.").
 #[gpui::test]
-fn unsent_operator_selection_does_not_grant_app_access(cx: &mut TestAppContext) {
+fn an_unsent_operator_selection_is_not_needed_for_app_access(cx: &mut TestAppContext) {
     let (window, _, caller) = crate::shell::tests::window(cx);
     window
         .update(cx, |shell, _, cx| {
             shell.sessions[&caller].update(cx, |view, cx| view.enable_mode("operator", cx));
         })
         .unwrap();
-    assert_eq!(
-        call(window, caller, "unsent", "sessions.list", json!({}), cx).unwrap_err(),
-        "Operator is not enabled for this thread."
-    );
+    assert!(call(window, caller, "unsent", "sessions.list", json!({}), cx).is_ok());
 }
 
 #[gpui::test]
@@ -205,6 +207,8 @@ fn operator_scopes_sessions_and_preserves_an_unsent_draft(cx: &mut TestAppContex
             .iter()
             .any(|s| s["id"] == other)
     );
+    // C-2: a session may address another project's sessions; the bridge
+    // refused them ("Session is outside this project.").
     assert!(
         call(
             window,
@@ -214,7 +218,7 @@ fn operator_scopes_sessions_and_preserves_an_unsent_draft(cx: &mut TestAppContex
             json!({"sessionId":other}),
             cx
         )
-        .is_err()
+        .is_ok()
     );
     assert!(
         call(
@@ -326,87 +330,11 @@ fn operator_launches_can_build_nested_splits(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn operator_archive_delete_and_folder_actions_settle_after_persistence(cx: &mut TestAppContext) {
-    let (window, _, caller) = setup(cx);
-    let archived = launch(window, caller, "archive-child", json!({}), cx);
-    let deleted = launch(window, caller, "delete-child", json!({"reveal":true}), cx);
-    let folder = call(
-        window,
-        caller,
-        "folder",
-        "folders.move",
-        json!({"sessionId":deleted,"newFolderName":"Review tasks"}),
-        cx,
-    )
-    .unwrap();
-    assert!(folder["folderId"].is_string());
-    assert_eq!(
-        call(
-            window,
-            caller,
-            "archive",
-            "sessions.archive",
-            json!({"sessionId":archived}),
-            cx
-        )
-        .unwrap()["archived"],
-        true
-    );
-    assert_eq!(
-        call(
-            window,
-            caller,
-            "delete",
-            "sessions.delete",
-            json!({"sessionId":deleted}),
-            cx
-        )
-        .unwrap()["deleted"],
-        true
-    );
-    window
-        .update(cx, |shell, _, _| {
-            assert!(shell.session_summaries[&archived].archived);
-            assert!(!shell.session_summaries.contains_key(&deleted));
-            assert!(shell.workspace.tab_of(deleted).is_none());
-            assert!(
-                shell
-                    .groups
-                    .values()
-                    .all(|g| g.folder_of(deleted).is_none())
-            );
-            let db = locked(&shell.store).unwrap();
-            assert!(
-                db.sessions()
-                    .unwrap()
-                    .iter()
-                    .find(|s| s.id == archived)
-                    .unwrap()
-                    .archived
-            );
-            assert!(!db.sessions().unwrap().iter().any(|s| s.id == deleted));
-        })
-        .unwrap();
-    assert!(
-        call(
-            window,
-            caller,
-            "self-delete",
-            "sessions.delete",
-            json!({"sessionId":caller}),
-            cx
-        )
-        .is_err()
-    );
-}
-
-#[gpui::test]
 fn operator_retries_use_durable_receipts_and_reject_changed_input(cx: &mut TestAppContext) {
     let (window, _, caller) = setup(cx);
     let child = launch(window, caller, "repeat", json!({}), cx);
-    window
-        .update(cx, |shell, _, _| shell.app_results.clear())
-        .unwrap();
+    // The bridge's results in memory were cleared here, as after a restart;
+    // the control pipeline keeps its receipts in the store alone (C-5).
     let retry = launch(window, caller, "repeat", json!({}), cx);
     assert_eq!(retry, child);
     assert!(
@@ -492,176 +420,4 @@ fn operator_notes_and_conversation_paging_use_the_project_api(cx: &mut TestAppCo
         )
         .is_err()
     );
-}
-
-#[gpui::test]
-fn operator_creates_selects_and_validates_real_worktrees(cx: &mut TestAppContext) {
-    let root = std::env::temp_dir().join(format!(
-        "operator-worktrees-{}",
-        monocode_core::mono::new_id()
-    ));
-    let project = root.join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&project)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "-q"]);
-    std::fs::write(project.join("README.md"), "Fixture\n").unwrap();
-    git(&["add", "."]);
-    git(&[
-        "-c",
-        "user.name=Operator Test",
-        "-c",
-        "user.email=test@example.invalid",
-        "commit",
-        "-qm",
-        "Fixture",
-    ]);
-    let project = project.to_string_lossy().into_owned();
-    let store = Arc::new(Mutex::new(Store::open(&root.join("native.db")).unwrap()));
-    let caller = locked(&store).unwrap().create("codex", &project).unwrap();
-    let id = caller.id;
-    let window = cx.update(|cx| {
-        cx.open_window(Default::default(), |_, cx| {
-            cx.new(|cx| Shell::new(store, vec![caller], project.clone(), None, cx))
-        })
-        .unwrap()
-    });
-    cx.run_until_parked();
-    window
-        .update(cx, |shell, _, cx| {
-            shell.ensure_session(id, cx).unwrap().update(cx, |v, cx| {
-                v.install_transfer(
-                    Settings {
-                        operator_enabled: true,
-                        ..Default::default()
-                    },
-                    None,
-                    cx,
-                );
-            })
-        })
-        .unwrap();
-    cx.run_until_parked();
-    let tree = call(
-        window,
-        id,
-        "create-tree",
-        "worktrees.create",
-        json!({"branch":"operator-review","base":"HEAD"}),
-        cx,
-    )
-    .unwrap();
-    let path = tree["path"].as_str().unwrap();
-    assert!(std::path::Path::new(path).join("README.md").is_file());
-    let listed = call(window, id, "list-trees", "worktrees.list", json!({}), cx).unwrap();
-    assert!(
-        listed["worktrees"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t["path"] == path)
-    );
-    let selected = launch(window, id, "select-tree", json!({"worktreeCwd":path}), cx);
-    window
-        .update(cx, |shell, _, cx| {
-            assert_eq!(
-                shell.sessions[&selected]
-                    .read(cx)
-                    .settings
-                    .worktree_cwd
-                    .as_deref(),
-                Some(path)
-            )
-        })
-        .unwrap();
-    let fresh = launch(
-        window,
-        id,
-        "new-tree",
-        json!({"workspaceMode":"worktree","worktreeBase":"HEAD"}),
-        cx,
-    );
-    window
-        .update(cx, |shell, _, cx| {
-            let path = shell.sessions[&fresh]
-                .read(cx)
-                .settings
-                .worktree_cwd
-                .as_deref()
-                .unwrap();
-            assert_ne!(path, project);
-            assert!(std::path::Path::new(path).join("README.md").is_file());
-        })
-        .unwrap();
-    let before = window
-        .update(cx, |shell, _, _| {
-            locked(&shell.store).unwrap().sessions().unwrap().len()
-        })
-        .unwrap();
-    assert!(
-        call(
-            window,
-            id,
-            "invalid-checkout",
-            "sessions.start",
-            json!({"prompt":"Must not launch","draft":true,"worktreeCwd":"/unrelated-checkout"}),
-            cx
-        )
-        .is_err()
-    );
-    window
-        .update(cx, |shell, _, _| {
-            assert_eq!(
-                locked(&shell.store).unwrap().sessions().unwrap().len(),
-                before
-            )
-        })
-        .unwrap();
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[gpui::test]
-fn app_launch_submission_uses_the_saved_message_identity(cx: &mut TestAppContext) {
-    let (window, _, caller) = setup(cx);
-    let child = launch(window, caller, "queued-seed", json!({}), cx);
-    let expected = window
-        .update(cx, |shell, _, cx| {
-            let view = shell.sessions[&child].clone();
-            let expected = locked(&shell.store)
-                .unwrap()
-                .follow_ups(child)
-                .unwrap()
-                .draft
-                .unwrap()
-                .id;
-            view.update(cx, |v, cx| {
-                // Hold the provider boundary: verify queue acceptance without starting
-                // a real CLI or making an inference request.
-                v.busy = true;
-                v.install_app_launch(v.settings.clone(), true, cx);
-            });
-            expected
-        })
-        .unwrap();
-    cx.run_until_parked();
-    window
-        .update(cx, |shell, _, cx| {
-            let state = locked(&shell.store).unwrap().follow_ups(child).unwrap();
-            assert!(state.draft.is_none());
-            assert_eq!(state.messages.len(), 1);
-            assert_eq!(state.messages[0].id, expected);
-            assert_eq!(state.messages[0].text, "Review this project");
-            shell.sessions[&child].update(cx, |v, _| v.busy = false);
-        })
-        .unwrap();
 }

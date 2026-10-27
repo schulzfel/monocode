@@ -76,7 +76,6 @@ impl Conversation {
             || self.orchestration_progress.is_some()
             || self.settings.usage_limit.is_some()
             || !self.history_actions.is_empty()
-            || self.mono_ui.external.is_some()
             || self.controls.is_some()
             || self.needs_approval()
             || self.attaching
@@ -154,7 +153,6 @@ impl Conversation {
                         }
                         this.run_history_actions(cx);
                         this.pump_follow_ups(cx);
-                        this.mono_flush_external(cx);
                     }
                     Err(error) => this.status = SessionStatus::error(error),
                 }

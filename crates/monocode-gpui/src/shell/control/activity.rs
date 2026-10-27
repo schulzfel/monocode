@@ -106,6 +106,21 @@ pub(super) fn target(wire: &Value) -> Option<String> {
 }
 
 impl Shell {
+    /// Records the refusal of `call` and answers with it. A refusal is not a
+    /// result: no receipt, so a retry after the person grants the scope runs
+    /// for real.
+    pub(super) fn refuse_control(
+        &mut self,
+        call: Pending,
+        error: ControlError,
+        cx: &mut Context<Self>,
+    ) {
+        let result = Err(error);
+        let logged = wire(&call.command, call.request_id.as_deref());
+        self.record_control(&call.caller, &call.command, logged.as_ref(), &result, cx);
+        let _ = call.reply.send(result);
+    }
+
     /// Logs a finished call, unless it only reads; `wire` is its command
     /// as [`wire`] made it.
     pub(super) fn record_control(

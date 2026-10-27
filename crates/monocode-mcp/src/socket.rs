@@ -1,8 +1,9 @@
 //! The stdio relay's backend: one control connection, opened on the first
 //! tool call. Tool calls share it concurrently: a `session_wait` never holds
 //! up a read. The same connection carries the relay's subscriptions; their
-//! notices go to the sink the relay set up.
-use crate::{Options, backend::Backend};
+//! notices go to the sink the relay set up. A connection that follows
+//! nothing is let go once no call has used it for a while (`idle`).
+use crate::{Options, backend::Backend, idle::Idle};
 use monocode_control::{
     Client, ClientInfo, Command, ControlError, ErrorCode, NoticeSink, Topic, lock,
     session_caller_name,
@@ -10,25 +11,65 @@ use monocode_control::{
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
+/// The relay's client, shared with the timer that lets it go.
+type Current = Arc<Mutex<Option<Arc<Client>>>>;
+
 pub(crate) struct Socket {
     options: Options,
-    client: Mutex<Option<Arc<Client>>>,
+    client: Current,
+    idle: Arc<Idle>,
     notices: NoticeSink,
 }
 
 impl Socket {
     pub(crate) fn new(options: Options, notices: NoticeSink) -> Self {
         Self {
+            idle: Arc::new(Idle::new(options.release_after)),
             options,
-            client: Mutex::new(None),
+            client: Current::default(),
             notices,
+        }
+    }
+
+    /// Runs `work` with the client; once nothing runs, times its release.
+    fn with<T>(
+        &self,
+        peer: Option<&ClientInfo>,
+        work: impl FnOnce(&Client) -> Result<T, ControlError>,
+    ) -> Result<T, ControlError> {
+        self.idle.begin();
+        let result = self.run(peer, work);
+        if self.idle.end() {
+            self.time_release();
+        }
+        result
+    }
+
+    /// Lets the client go once no call has used it for the release delay,
+    /// unless it follows topics. Dropping it hangs up its connection, and
+    /// the next call makes a new client that connects afresh, as after the
+    /// app was gone.
+    fn time_release(&self) {
+        let (idle, current) = (Arc::clone(&self.idle), Arc::clone(&self.client));
+        let started = std::thread::Builder::new()
+            .name("relay-idle".into())
+            .spawn(move || {
+                idle.wait_then(|| {
+                    let mut client = lock(&current);
+                    let unused = client.take_if(|c| c.topics().is_empty());
+                    drop(client);
+                    drop(unused);
+                });
+            });
+        if started.is_err() {
+            self.idle.untimed();
         }
     }
 
     /// Runs `work` with the client. A client that follows nothing is
     /// dropped when the app is gone, so the next call starts afresh; one
     /// that follows topics stays to follow them again.
-    fn with<T>(
+    fn run<T>(
         &self,
         peer: Option<&ClientInfo>,
         work: impl FnOnce(&Client) -> Result<T, ControlError>,

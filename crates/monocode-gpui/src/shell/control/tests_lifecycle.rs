@@ -1,7 +1,9 @@
-//! `session_compact` and `session_handoff` against the fixture shell, and
-//! the sessions `session_delete` refuses before asking. Compaction is only
-//! refused here: starting it would launch the provider's CLI.
-use super::tests::{CLIENT, run, set_busy, two_sessions};
+//! `session_compact` and `session_handoff` against the fixture shell, the
+//! sessions `session_delete` refuses before asking, and the projects an
+//! agent session may not remove. Compaction is only refused here: starting
+//! it would launch the provider's CLI.
+use super::tests::{CLIENT, approve, run, sessions, set_busy, setup, two_sessions};
+use super::tests_gate::{add_session, grant, make_worker};
 use super::*;
 use gpui::TestAppContext;
 use monocode_control::{
@@ -167,7 +169,7 @@ fn orchestration_workers_are_refused_before_anyone_is_asked(cx: &mut TestAppCont
                 Request::Call {
                     caller: CLIENT.into(),
                     request_id: None,
-                    command: Command::SessionDelete(SessionInput { session_id: b }),
+                    command: Box::new(Command::SessionDelete(SessionInput { session_id: b })),
                     reply,
                 },
                 window,
@@ -189,4 +191,46 @@ fn orchestration_workers_are_refused_before_anyone_is_asked(cx: &mut TestAppCont
             assert!(shell.session_summaries.contains_key(&b))
         })
         .unwrap();
+}
+
+/// R3: an agent session is not asked before it removes a project, so it may
+/// not remove its own, nor one where an orchestration's worker runs. A
+/// client is asked first, as before.
+#[gpui::test]
+fn a_session_cannot_remove_its_own_project_or_one_with_workers(cx: &mut TestAppContext) {
+    let window = setup(cx);
+    approve(window, &[(CLIENT, &Scope::ALL)], cx);
+    let (a, b) = sessions(window, cx);
+    let remove = |project: &str| {
+        Command::ProjectDelete(monocode_control::ops::rail::ProjectTarget {
+            project: project.into(),
+        })
+    };
+    let me = CallerKind::Session(b);
+    let client = CallerKind::External(CLIENT.into());
+    let own = grant(window, &me, &remove("/work/monocode"), cx).unwrap_err();
+    assert_eq!(
+        (own.code, own.message.as_str()),
+        (
+            ErrorCode::InvalidInput,
+            "A session cannot delete its own project."
+        )
+    );
+    assert!(grant(window, &me, &remove("/work/another-project"), cx).is_ok());
+    let worker = add_session(window, "/work/another-project", false, cx);
+    make_worker(window, a, worker, cx);
+    let theirs = grant(window, &me, &remove("/work/another-project"), cx).unwrap_err();
+    assert_eq!(
+        (theirs.code, theirs.message),
+        (
+            ErrorCode::InvalidInput,
+            format!("Session {worker} belongs to an orchestration; only its lead manages it")
+        )
+    );
+    for project in ["/work/monocode", "/work/another-project"] {
+        assert!(
+            grant(window, &client, &remove(project), cx).is_ok(),
+            "{project}"
+        );
+    }
 }

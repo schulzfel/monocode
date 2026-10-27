@@ -1,6 +1,5 @@
 mod accounts;
 mod actions;
-mod app_commands;
 mod app_views;
 mod automation_runs;
 mod classic_sidebar;
@@ -22,6 +21,8 @@ mod picker_preferences;
 mod project_rail;
 mod project_removal;
 mod project_settings;
+#[cfg(debug_assertions)]
+mod qa;
 mod quick_composer;
 mod quick_open;
 mod rails;
@@ -68,6 +69,7 @@ use crate::{
     usage_footer::UsageFooter,
     workspace::{DockSide, TitleTab, VisitHistory, Workspace, project_name},
 };
+pub(crate) use control::MONO_OPS;
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
     FocusHandle, Focusable, FontWeight, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -540,10 +542,7 @@ pub(crate) struct Shell {
     monos: Option<Entity<crate::monos::Monos>>,
     quick_open: Option<quick_open::Open>,
     image_lightbox: Option<(Entity<crate::image_lightbox::ImageLightbox>, Subscription)>,
-    app_bridge: Option<monocode_core::mono::bridge::Server>,
     mobile: mobile_host::Mobile,
-    app_results: HashMap<(i64, String), (String, Result<serde_json::Value, String>)>,
-    app_pending: HashSet<(i64, String)>,
     /// External control (MCP): policy, listener and pending approvals.
     control: control::Control,
     orchestrations: HashMap<i64, orchestration::Run>,
@@ -904,10 +903,7 @@ impl Shell {
             monos: None,
             quick_open: None,
             image_lightbox: None,
-            app_bridge: None,
             mobile: mobile_host::Mobile::default(),
-            app_results: HashMap::new(),
-            app_pending: HashSet::new(),
             control: control::Control::default(),
             orchestrations: HashMap::new(),
             orchestration_summaries: sidebar_metadata.orchestrations,
@@ -1155,7 +1151,6 @@ impl Shell {
             }));
         this.monos = Some(monos);
         this.bind_notices(cx);
-        this.init_app_bridge(cx);
         this.init_control(cx);
         for summary in summaries {
             if this
@@ -1255,9 +1250,7 @@ impl Shell {
             // the indexed working directory so those events cannot erase it.
             view.restore_worktree(worktree, None, cx);
             view.draft_hint = self.draft_sessions.contains(&id);
-            if let Some(bridge) = &self.app_bridge {
-                view.set_app_environment(bridge.environment(id));
-            }
+            view.set_orchestration_worker(self.orchestration_worker(id));
             view.set_project_appearance(appearance, cx);
             view.transcript.update(cx, |transcript, cx| {
                 transcript.apply_preferences(&self.workspace.preferences, cx)

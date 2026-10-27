@@ -4,6 +4,9 @@ pub(crate) mod avatar;
 pub(crate) mod cards;
 mod changes;
 mod color_picker;
+pub(crate) mod control;
+mod control_files;
+pub(crate) mod control_own;
 mod files;
 mod filters;
 mod floating;
@@ -19,7 +22,13 @@ mod search;
 #[cfg(all(target_os = "macos", not(test)))]
 mod status;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+#[cfg(test)]
+mod tests_control;
+#[cfg(test)]
+mod tests_own;
+#[cfg(test)]
+pub(crate) mod tests_parity_mono;
 mod work;
 use crate::{
     conversation::{Conversation, MonoSubmitted, SessionChanged},
@@ -82,9 +91,7 @@ pub(crate) struct Monos {
     pub(crate) roster: Roster,
     pub(crate) active: Option<String>,
     chats: HashMap<String, Entity<Conversation>>,
-    bridge: Option<mono::bridge::Server>,
     observations: Vec<Subscription>,
-    _bridge_task: Option<gpui::Task<()>>,
     _clock: Option<gpui::Task<()>>,
     writes: Option<gpui::Task<()>>,
     loading_chats: HashSet<String>,
@@ -145,8 +152,6 @@ pub(crate) struct Monos {
     card_refresh: HashMap<String, u64>,
     session_filters: filters::Filters,
     session_filter_anchor: AnchorSlot,
-    app_results: HashMap<(i64, String), (String, Result<serde_json::Value, String>)>,
-    app_pending: HashSet<(i64, String)>,
 }
 impl EventEmitter<Changed> for Monos {}
 impl EventEmitter<TabOpened> for Monos {}
@@ -277,14 +282,6 @@ impl Monos {
                 Some(error),
             ),
         };
-        let (bridge, rx) = if cx.is_test() {
-            (None, None)
-        } else {
-            match mono::bridge::Server::start() {
-                Ok((server, rx)) => (Some(server), Some(rx)),
-                Err(_) => (None, None),
-            }
-        };
         let persisted_messages = roster
             .monos
             .iter()
@@ -308,9 +305,7 @@ impl Monos {
             roster,
             active: None,
             chats: HashMap::new(),
-            bridge,
             observations: Vec::new(),
-            _bridge_task: None,
             _clock: None,
             writes: None,
             loading_chats: HashSet::new(),
@@ -366,21 +361,7 @@ impl Monos {
             card_refresh: HashMap::new(),
             session_filters,
             session_filter_anchor: AnchorSlot::default(),
-            app_results: HashMap::new(),
-            app_pending: HashSet::new(),
         };
-        if let Some(rx) = rx {
-            this._bridge_task = Some(cx.spawn(async move |this, cx| {
-                while let Ok(call) = rx.recv().await {
-                    if this
-                        .update_in(cx, |this, window, cx| this.app_call(call, window, cx))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }));
-        }
         this._clock = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -702,13 +683,8 @@ impl Monos {
                 let mono = mono.clone();
                 let view = cx.new(|cx| Conversation::new(summary, this.store.clone(), cx));
                 let root = this.root.clone();
-                let env = this
-                    .bridge
-                    .as_ref()
-                    .map(|b| b.environment(view.read(cx).summary.id))
-                    .unwrap_or_default();
                 view.update(cx, |view, cx| {
-                    view.configure_mono(mono, root, env, cx);
+                    view.configure_mono(mono, root, cx);
                     if let Some(settings) = settings {
                         let config = view.settings.mono.take();
                         let env = std::mem::take(&mut view.settings.environment);
@@ -864,13 +840,8 @@ impl Monos {
         if let (Some(mono), Some(view)) =
             (self.roster.get(id).cloned(), self.chats.get(id).cloned())
         {
-            let env = self
-                .bridge
-                .as_ref()
-                .map(|b| b.environment(view.read(cx).summary.id))
-                .unwrap_or_default();
             let root = self.root.clone();
-            view.update(cx, |view, cx| view.configure_mono(mono, root, env, cx));
+            view.update(cx, |view, cx| view.configure_mono(mono, root, cx));
         }
     }
     fn enqueue(

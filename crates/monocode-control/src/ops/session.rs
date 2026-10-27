@@ -79,8 +79,9 @@ pub const MAX_SESSIONS_PER_PAGE: u32 = 200;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionListInput {
-    /// A local project's path or key, as `project_list` reports it; the
-    /// current project when absent.
+    /// A local project's path or key, as `project_list` reports it; when
+    /// absent, the calling agent session's project, or for other clients
+    /// the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// Archived sessions: `exclude` (default), `include` or `only`.
@@ -150,6 +151,10 @@ impl Operation for SessionList {
     type Input = SessionListInput;
     type Output = SessionListOutput;
 
+    fn project_slot(input: &mut SessionListInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
+
     fn summary(output: &SessionListOutput) -> String {
         let busy = output.sessions.iter().filter(|s| s.busy).count();
         let more = if output.next_cursor.is_some() {
@@ -179,6 +184,10 @@ pub struct SessionReadInput {
     /// `nextBefore` from the previous page: exchanges before this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<String>,
+    /// Exchanges before the exchange at this index, counting from 0 at the
+    /// oldest; an index past the end reads the newest. Not with `before`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_index: Option<u32>,
     /// Exchanges per page (1 to 3, default 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
@@ -237,7 +246,7 @@ impl Operation for SessionRead {
     const TITLE: &'static str = "Read session";
     const SUBJECT: &'static [&'static str] = &["sessionId"];
     const SCOPE: Scope = Scope::Read;
-    const DESCRIPTION: &'static str = "Read a session's exchanges, newest last: each of the person's messages with the agent's last reply, cut to `maxChars`. Page back with `before` set to `nextBefore`.";
+    const DESCRIPTION: &'static str = "Read a session's exchanges, newest last: each of the person's messages with the agent's last reply, cut to `maxChars`. Page back with `before` set to `nextBefore`, or with `beforeIndex` from an exchange's position.";
     const HINTS: Hints = Hints::READ;
     type Input = SessionReadInput;
     type Output = SessionReadOutput;

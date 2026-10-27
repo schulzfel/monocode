@@ -20,11 +20,14 @@ impl Conversation {
                 .update(cx, |input, cx| input.set_text(format!("{text} "), cx));
         }
     }
-    pub(crate) fn set_app_environment(
-        &mut self,
-        environment: std::collections::HashMap<String, String>,
-    ) {
-        self.app_environment = environment;
+    /// Marks this chat as an orchestration worker's: its turns get no
+    /// MonoCode tools (`runtime::app_control`).
+    pub(crate) fn set_orchestration_worker(&mut self, worker: bool) {
+        self.orchestration_worker = worker;
+    }
+    #[cfg(test)]
+    pub(crate) fn orchestration_worker(&self) -> bool {
+        self.orchestration_worker
     }
     pub(crate) fn enable_mode(&mut self, id: &str, cx: &mut Context<Self>) {
         let enabled = match id {
@@ -150,7 +153,7 @@ impl Conversation {
                 }
                 self.save_settings(cx);
                 text = if rest.is_empty() && mode == "operator" {
-                    "Explain what you can do in MonoCode with the app CLI.".into()
+                    crate::runtime::operator_prompt::EMPTY_REQUEST.into()
                 } else {
                     rest
                 };
@@ -457,15 +460,25 @@ impl Conversation {
             monocode_core::response::limit(&format!("{}\n{}", self.status, text), 12_000),
         )
     }
+    /// Whether the person left text or attachments unsent in the composer.
+    pub(crate) fn has_unsent_composer(&self, cx: &gpui::App) -> bool {
+        !self.input.read(cx).content.is_empty() || !self.attachments.is_empty()
+    }
     pub(crate) fn ready_for_external(&self, cx: &gpui::App) -> bool {
-        self.history_ready()
-            && !self.editing_last_turn.pending()
+        self.history_ready() && self.idle_for_external(cx)
+    }
+    /// Whether a message from outside the composer could start a turn once
+    /// the history has loaded: nothing runs or is being prepared, the
+    /// composer is empty, and no other such message waits for the history.
+    pub(crate) fn idle_for_external(&self, cx: &gpui::App) -> bool {
+        !self.editing_last_turn.pending()
             && !self.busy
             && !self.stopping
             && !self.preparing_worktree
             && !self.attaching
             && self.input.read(cx).content.is_empty()
             && self.attachments.is_empty()
+            && !self.external_waiting()
     }
     /// Managed runs must wait for history restoration and worktree setup as
     /// well as the provider, including submissions deferred by the editor.
@@ -478,7 +491,6 @@ impl Conversation {
             || self.loading
             || (!self.history_actions.is_empty() && self.history_ready())
             || self.editing_last_turn.pending()
-            || self.mono_external_pending()
     }
     /// An evicted history can be restored for a managed run; a user's draft
     /// or an already accepted message must keep ownership of this composer.
@@ -489,7 +501,6 @@ impl Conversation {
             && !self.attaching
             && !self.account_switching
             && !self.editing_last_turn.pending()
-            && !self.mono_external_pending()
             && self.input.read(cx).content.is_empty()
             && self.attachments.is_empty()
             && self.follow_ups.state.messages.is_empty()

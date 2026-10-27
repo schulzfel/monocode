@@ -1,14 +1,11 @@
-//! Notes for Operator, Monos and external control clients: typed calls, and
-//! the JSON actions `notes.list`, `notes.read` and `notes.write` Operator
-//! threads and Monos use. Notes keep their persisted string IDs, including
-//! desktop-created ones, and a caller sees only the notes of its projects
-//! and those of no project.
-use super::{bounded, optional_text};
+//! Notes for agent sessions, Monos and external control clients, as the
+//! `notes_*` operations call them. Notes keep their persisted string IDs,
+//! including desktop-created ones, and a caller sees only the notes of its
+//! projects and those of no project.
 use crate::{
     notes::{Note, NoteUpsert},
     store::Store,
 };
-use serde_json::{json, Value};
 use std::fmt;
 
 /// The longest body a write accepts, in bytes.
@@ -96,7 +93,8 @@ pub fn read_note(store: &Store, projects: &[String], id: &str) -> Result<Note, N
 /// Creates a note in the first of `projects`, or changes the one
 /// `write.id` names, for `caller`'s `request`: retrying the request finds
 /// the note it created. A caller without a session, such as an external
-/// control client, records no source session.
+/// control client, records no source session. Tags past the note's limits
+/// are refused, as Operator and Monos refused them, not cut short.
 pub fn write_note(
     store: &Store,
     caller: Option<i64>,
@@ -104,6 +102,16 @@ pub fn write_note(
     write: NoteWrite,
     projects: &[String],
 ) -> Result<Note, NoteError> {
+    if write.tags.as_ref().is_some_and(|tags| {
+        tags.len() > crate::notes::MAX_TAGS
+            || tags
+                .iter()
+                .any(|tag| tag.len() > crate::notes::MAX_TAG_LENGTH)
+    }) {
+        return Err(NoteError::Invalid(
+            "tags must be an array of up to 20 short strings".into(),
+        ));
+    }
     let current = write
         .id
         .as_deref()
@@ -168,69 +176,4 @@ pub fn write_note(
             .unwrap_or_else(|| projects.first().cloned()),
         finalize_slug: true,
     })?)
-}
-
-/// `notes.list`, `notes.read` and `notes.write` for an Operator thread or
-/// Mono, session `caller`.
-pub fn notes_action(
-    store: &Store,
-    caller: i64,
-    request: &str,
-    action: &str,
-    input: &Value,
-    projects: &[String],
-) -> Result<Value, String> {
-    notes_action_for(store, Some(caller), request, action, input, projects)
-}
-
-/// [`notes_action`] for a caller that may have no session.
-pub fn notes_action_for(
-    store: &Store,
-    caller: Option<i64>,
-    request: &str,
-    action: &str,
-    input: &Value,
-    projects: &[String],
-) -> Result<Value, String> {
-    let id = input
-        .get("id")
-        .map(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .or_else(|| v.as_u64().map(|id| id.to_string()))
-                .ok_or("id must be a note ID")
-        })
-        .transpose()?;
-    let note = match action {
-        "notes.list" => {
-            let limit = bounded(input, "limit", 30, 1, 100)?;
-            let offset = bounded(input, "offset", 0, 0, usize::MAX)?;
-            let (total, notes) =
-                list_notes(store, projects, limit, offset).map_err(|e| e.to_string())?;
-            return Ok(
-                json!({"total":total,"offset":offset,"notes":notes.iter().map(|n|json!({"id":n.id,"title":n.title,"preview":n.preview(),"tags":n.tags,"sourceCwd":n.source_cwd})).collect::<Vec<_>>() }),
-            );
-        }
-        "notes.read" => read_note(store, projects, id.as_deref().ok_or("Provide id")?),
-        _ => {
-            let write = NoteWrite {
-                id,
-                title: optional_text(input, "title", crate::notes::MAX_TITLE)?,
-                body: input
-                    .get("body")
-                    .map(|v| {
-                        v.as_str()
-                            .map(str::to_owned)
-                            .ok_or_else(|| format!("body must be text under {MAX_BODY} bytes"))
-                    })
-                    .transpose()?,
-                tags: input
-                    .get("tags")
-                    .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
-                    .transpose()?,
-            };
-            write_note(store, caller, request, write, projects)
-        }
-    };
-    note.map(|note| json!(note)).map_err(|e| e.to_string())
 }

@@ -1,8 +1,10 @@
 //! `session_configure` and `session_draft`: the phone's model and access
 //! sheets for one session (`control_configure`, which remembers nothing as
-//! a default) and Operator's draft (`save_app_draft`).
+//! a default) and Operator's draft (`control_draft`, saved as `/draft`
+//! saves one once the chat has loaded).
 use super::dispatch::prompt;
 use super::*;
+use crate::conversation::ExternalDraft;
 use monocode_control::ops::{
     configure::{
         SessionConfigureInput, SessionConfigureOutput, SessionDraftInput, SessionDraftOutput,
@@ -83,27 +85,42 @@ impl Shell {
         })
     }
 
+    /// A chat that is not loaded yet takes the draft once it has loaded;
+    /// the reply waits for that.
     pub(super) fn control_session_draft(
         &mut self,
         input: &SessionDraftInput,
         cx: &mut Context<Self>,
-    ) -> Result<SessionDraftOutput, ControlError> {
+    ) -> Result<Exec, ControlError> {
         let text = prompt(&input.text)?;
         let id = input.session_id;
         let view = self.control_idle_view(id, cx)?;
-        if !view.read(cx).ready_for_external(cx) {
-            return Err(busy(id));
-        }
-        if view.read(cx).has_saved_draft() || !view.read(cx).input.read(cx).content.is_empty() {
-            return Err(ControlError::new(
+        let (done, outcome) = async_channel::bounded(1);
+        view.update(cx, |view, cx| {
+            view.control_draft(text, move |outcome| _ = done.try_send(outcome), cx);
+        });
+        let reply = move |outcome| match outcome {
+            ExternalDraft::Saved(saved) => output(&SessionDraftOutput {
+                session_id: id,
+                saved,
+            }),
+            // The person's unsent text or attachments are a draft, not a
+            // busy session (`control_draft` tells them apart).
+            ExternalDraft::Kept => Err(ControlError::new(
                 ErrorCode::SessionNotIdle,
                 format!("Session {id} already has an unsent draft; it was kept."),
-            ));
+            )),
+            ExternalDraft::Busy => Err(busy(id)),
+        };
+        if let Ok(outcome) = outcome.try_recv() {
+            return Ok(Exec::Ready(reply(outcome)));
         }
-        view.update(cx, |view, cx| view.save_app_draft(text, cx));
-        Ok(SessionDraftOutput {
-            session_id: id,
-            saved: true,
-        })
+        Ok(Exec::Later(cx.spawn(async move |_, _| {
+            let outcome = outcome
+                .recv()
+                .await
+                .map_err(|_| ControlError::internal("The session closed before it loaded"))?;
+            reply(outcome)
+        })))
     }
 }

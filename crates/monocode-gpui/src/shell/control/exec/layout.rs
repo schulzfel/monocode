@@ -122,7 +122,9 @@ impl Shell {
         }
         self.control_session(target, cx)?;
         let project = self.session_metadata(id, cx).summary.cwd.clone();
-        if self.session_metadata(target, cx).summary.cwd != project {
+        if monocode_core::files::path_key(&self.session_metadata(target, cx).summary.cwd)
+            != monocode_core::files::path_key(&project)
+        {
             return Err(ControlError::invalid_input(format!(
                 "Session {id} belongs to {project}; split a pane of that project."
             )));

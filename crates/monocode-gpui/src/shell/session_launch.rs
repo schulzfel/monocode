@@ -1,7 +1,7 @@
-//! Starting a session in a target project with explicit launch options and
-//! no caller session. Operator's `sessions.start` and external control's
-//! `session_start` share this pipeline; only who started the session, and so
-//! the idempotency key and the started-by record, differ. `launch_settings`
+//! Starting a session in a target project with explicit launch options.
+//! `session_start` from an agent session, a Mono or an external client runs
+//! this pipeline; only who started the session, and so the idempotency key
+//! and the started-by record, differ. `launch_settings`
 //! strips Operator, plan, orchestration and environment from every launch,
 //! so a launched session never gets control capability of its own.
 use super::*;
@@ -13,10 +13,13 @@ use serde_json::Value;
 /// Who started a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Origin {
-    /// Another session, through Operator.
+    /// Another agent session.
     Session(i64),
     /// An external control client, recorded as `mcp:<client>`.
     Client(String),
+    /// Mono `mono`, from its main chat or habit run `caller`. It records the
+    /// launch in its roster, not as a started-by link.
+    Mono { caller: i64, mono: String },
 }
 
 /// A launch resolved on the UI thread, ready for a worker.
@@ -43,6 +46,15 @@ pub(super) struct Launched {
     pub(super) settings: Settings,
     /// Whether this call created it.
     pub(super) fresh: bool,
+}
+
+/// What a launch by an agent session starts from, read on the UI thread.
+pub(super) struct Source {
+    /// The new session's provider.
+    pub(super) kind: Kind,
+    /// The provider `settings` came from.
+    pub(super) provider: String,
+    pub(super) settings: Settings,
 }
 
 /// What a new chat starts from, read on the UI thread.
@@ -108,7 +120,7 @@ pub(super) fn launch_session(store: &Database, launch: Launch) -> Result<Launche
         .unwrap_or_else(|| prompt.chars().take(160).collect());
     let mut store = locked(store)?;
     let (mut summary, fresh) = match &origin {
-        Origin::Session(caller) => {
+        Origin::Session(caller) | Origin::Mono { caller, .. } => {
             store.create_app_session(*caller, &request, &fingerprint, kind.id(), &project)?
         }
         Origin::Client(_) => store.create_keyed_session(
@@ -130,6 +142,8 @@ pub(super) fn launch_session(store: &Database, launch: Launch) -> Result<Launche
         match &origin {
             Origin::Session(caller) => store.save_started_link(summary.id, *caller)?,
             Origin::Client(client) => store.save_started_client(summary.id, client)?,
+            // The Mono records it in its roster once it is installed.
+            Origin::Mono { .. } => {}
         }
         store.prepare_app_prompt(summary.id, &request, &prompt)?;
         summary.has_messages = true;
@@ -142,6 +156,84 @@ pub(super) fn launch_session(store: &Database, launch: Launch) -> Result<Launche
 }
 
 impl Shell {
+    /// What a launch in `project` by session `caller` starts from, as
+    /// Operator's do: the caller's live settings, and its provider unless
+    /// `harness` names another. The same provider keeps the caller's
+    /// account; another gets the one `project` selects. A launch into
+    /// another project leaves the caller's worktree behind. `None` while
+    /// the caller's chat is not loaded.
+    pub(super) fn session_source(
+        &self,
+        caller: i64,
+        harness: Option<Kind>,
+        project: &str,
+        cx: &App,
+    ) -> Option<Source> {
+        let view = self.sessions.get(&caller)?.read(cx);
+        let provider = view.summary.provider.clone();
+        let kind = harness
+            .or_else(|| Kind::parse(&provider))
+            .unwrap_or_else(|| self.default_kind_for(project));
+        let mut settings = view.settings.clone();
+        if monocode_core::files::path_key(&view.summary.cwd)
+            != monocode_core::files::path_key(project)
+        {
+            settings.worktree_cwd = None;
+        }
+        if kind.id() != provider {
+            settings.account = crate::accounts::get(cx)
+                .map(|center| center.read(cx).selected(kind, project))
+                .unwrap_or_default();
+        }
+        Some(Source {
+            kind,
+            provider,
+            settings,
+        })
+    }
+
+    /// What a launch in `project` by Mono `mono`, calling from session
+    /// `caller`, starts from, as the bridge's did (MO-16, MO-20): the Mono's
+    /// main chat, else the calling habit run, and its provider unless
+    /// `harness` names another, else Codex. The same provider keeps the
+    /// source's account; another gets the one `project` selects. A launch
+    /// outside the source's own folder leaves its worktree behind.
+    pub(super) fn mono_source(
+        &self,
+        caller: i64,
+        mono: &str,
+        harness: Option<Kind>,
+        project: &str,
+        cx: &App,
+    ) -> Source {
+        let view = self
+            .monos
+            .as_ref()
+            .and_then(|m| m.read(cx).source_view(caller, mono));
+        let view = view.as_ref().map(|v| v.read(cx));
+        let kind = harness
+            .or_else(|| view.and_then(|v| Kind::parse(&v.summary.provider)))
+            .unwrap_or(Kind::Codex);
+        let provider = view.map_or_else(|| kind.id().to_owned(), |v| v.summary.provider.clone());
+        let mut settings = view.map(|v| v.settings.clone()).unwrap_or_default();
+        if view.is_none_or(|v| {
+            monocode_core::files::path_key(&v.summary.cwd)
+                != monocode_core::files::path_key(project)
+        }) {
+            settings.worktree_cwd = None;
+        }
+        if kind.id() != provider {
+            settings.account = crate::accounts::get(cx)
+                .map(|center| center.read(cx).selected(kind, project))
+                .unwrap_or_default();
+        }
+        Source {
+            kind,
+            provider,
+            settings,
+        }
+    }
+
     /// What a new chat of `kind` in `cwd` starts from.
     pub(super) fn new_chat(&self, kind: Kind, cwd: &str, cx: &App) -> NewChat {
         NewChat {
@@ -189,5 +281,30 @@ impl Shell {
             view.update(cx, |v, cx| v.install_app_launch(settings, !draft, cx));
         }
         self.app_place_launch(id, placement, reveal, window, cx);
+    }
+
+    /// Places launched session `id`: right of or below an open pane, which
+    /// it then focuses, or else revealed in its own tab when `reveal`.
+    pub(crate) fn app_place_launch(
+        &mut self,
+        id: i64,
+        placement: Option<(i64, Edge)>,
+        reveal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((target, edge)) =
+            placement.filter(|(target, _)| self.workspace.tab_of(*target).is_some())
+        {
+            self.open(target, window, cx);
+            let before = self.active_leaves();
+            self.workspace.place(id, target, edge);
+            self.begin_pane_motion(before, cx);
+            self.fit_sidebar(cx);
+            self.activate_session(id, window, cx);
+        } else if reveal {
+            self.open(id, window, cx);
+        }
+        self.persist(cx);
     }
 }

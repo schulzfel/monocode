@@ -25,7 +25,8 @@ pub const LISTED_FILES: u32 = 100;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitPathsInput {
-    /// A local project's path or key; the current project when absent.
+    /// A local project's path or key; when absent, the calling agent
+    /// session's project, or for other clients the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// Files or folders relative to the project (at most 200).
@@ -63,6 +64,10 @@ impl Operation for GitStage {
     type Input = GitPathsInput;
     type Output = ChangesReadOutput;
 
+    fn project_slot(input: &mut GitPathsInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
+
     fn summary(output: &ChangesReadOutput) -> String {
         changes_summary("Staged", output)
     }
@@ -81,6 +86,10 @@ impl Operation for GitUnstage {
     const HINTS: Hints = Hints::IDEMPOTENT;
     type Input = GitPathsInput;
     type Output = ChangesReadOutput;
+
+    fn project_slot(input: &mut GitPathsInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
 
     fn summary(output: &ChangesReadOutput) -> String {
         changes_summary("Unstaged", output)
@@ -102,6 +111,10 @@ impl Operation for GitDiscard {
     type Input = GitPathsInput;
     type Output = ChangesReadOutput;
 
+    fn project_slot(input: &mut GitPathsInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
+
     fn summary(output: &ChangesReadOutput) -> String {
         changes_summary("Discarded", output)
     }
@@ -115,7 +128,8 @@ pub struct GitCommit;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitCommitInput {
-    /// A local project's path or key; the current project when absent.
+    /// A local project's path or key; when absent, the calling agent
+    /// session's project, or for other clients the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// The commit message (1 to 20,000 characters).
@@ -144,6 +158,10 @@ impl Operation for GitCommit {
     const HINTS: Hints = Hints::CHANGE;
     type Input = GitCommitInput;
     type Output = GitCommitOutput;
+
+    fn project_slot(input: &mut GitCommitInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
 
     fn summary(output: &GitCommitOutput) -> String {
         format!(
@@ -182,6 +200,10 @@ impl Operation for GitPush {
     const CONFIRM: bool = true;
     type Input = ProjectInput;
     type Output = GitPushOutput;
+
+    fn project_slot(input: &mut ProjectInput) -> Option<&mut Option<String>> {
+        Some(&mut input.project)
+    }
 
     fn summary(output: &GitPushOutput) -> String {
         format!(

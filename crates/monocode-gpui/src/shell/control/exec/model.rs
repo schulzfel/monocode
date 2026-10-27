@@ -1,11 +1,12 @@
 //! `model_list`: Operator's model discovery (`models_catalog`), filtered
-//! and capped. Discovery runs on a worker, as Operator's does.
+//! and capped, with each model's settings and the access modes. Discovery
+//! runs on a worker, as Operator's does.
 use super::*;
 use monocode_control::ops::{
     self,
     model::{
-        DEFAULT_MODELS_PER_PROVIDER, MAX_MODELS_PER_PROVIDER, ModelListInput, ModelListOutput,
-        ModelSummary, ProviderModels,
+        AccessModeInfo, DEFAULT_MODELS_PER_PROVIDER, MAX_MODELS_PER_PROVIDER, ModelListInput,
+        ModelListOutput, ModelSetting, ModelSummary, ProviderModels, SettingOption,
     },
 };
 use monocode_core::accounts::Profile;
@@ -17,6 +18,7 @@ impl Shell {
     pub(super) fn control_model_list(
         &mut self,
         input: ModelListInput,
+        caller: &Caller,
         cx: &mut Context<Self>,
     ) -> Result<Exec, ControlError> {
         let limit = ops::limit(
@@ -35,16 +37,40 @@ impl Shell {
                 }
             },
         };
-        // Each provider's account for the current project, as Operator picks it.
-        let project = self.workspace.project.clone();
+        // Each provider's account for the project, as Operator picks it: an
+        // agent session's own provider lists with the session's account, the
+        // others with the account its project selects. A Mono's main chat
+        // (or habit run) lists its own provider with its account, the others
+        // with the account selected for no project, as the bridge did.
+        let project = match caller.caller {
+            CallerKind::Mono { .. } => String::new(),
+            CallerKind::Session(_) | CallerKind::External(_) => self
+                .caller_project(caller.caller, cx)
+                .unwrap_or_else(|| self.workspace.project.clone()),
+        };
+        let view = match caller.caller {
+            CallerKind::Session(id) => self.sessions.get(id).cloned(),
+            CallerKind::Mono { session, mono, .. } => self
+                .monos
+                .as_ref()
+                .and_then(|m| m.read(cx).source_view(*session, mono)),
+            CallerKind::External(_) => None,
+        };
+        let own = view.map(|view| {
+            let view = view.read(cx);
+            (view.summary.provider.clone(), view.settings.account.clone())
+        });
         let accounts = crate::accounts::get(cx);
         let profiles = kinds
             .into_iter()
             .map(|kind| {
-                let profile = accounts
-                    .as_ref()
-                    .map(|center| center.read(cx).selected(kind, &project))
-                    .unwrap_or_default();
+                let profile = match &own {
+                    Some((provider, account)) if provider == kind.id() => account.clone(),
+                    _ => accounts
+                        .as_ref()
+                        .map(|center| center.read(cx).selected(kind, &project))
+                        .unwrap_or_default(),
+                };
                 (kind, profile)
             })
             .collect();
@@ -58,6 +84,53 @@ impl Shell {
     }
 }
 
+/// A string field of `value`, or empty.
+fn text(value: &Value, key: &str) -> String {
+    value[key].as_str().unwrap_or_default().to_owned()
+}
+
+/// The settings a model in `models_catalog`'s shape offers.
+fn settings(model: &Value) -> Vec<ModelSetting> {
+    let options = |setting: &Value| {
+        setting["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|option| SettingOption {
+                value: text(option, "value"),
+                label: text(option, "label"),
+            })
+            .collect()
+    };
+    model["settings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|setting| ModelSetting {
+            id: text(setting, "id"),
+            label: text(setting, "label"),
+            default_value: text(setting, "defaultValue"),
+            options: options(setting),
+        })
+        .collect()
+}
+
+/// The access modes `models_catalog` describes (`runtimeModes`).
+fn access_modes(catalog: &Value) -> Vec<AccessModeInfo> {
+    catalog["runtimeModes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|mode| {
+            Some(AccessModeInfo {
+                id: serde_json::from_value(mode["id"].clone()).ok()?,
+                label: text(mode, "label"),
+                description: text(mode, "description"),
+            })
+        })
+        .collect()
+}
+
 /// Filters `catalog` by `search` and keeps at most `limit` models per
 /// provider, counting the rest as omitted.
 pub(in crate::shell::control) fn shape(
@@ -69,7 +142,6 @@ pub(in crate::shell::control) fn shape(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_lowercase);
-    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_owned();
     let providers = catalog["harnesses"]
         .as_array()
         .into_iter()
@@ -83,6 +155,7 @@ pub(in crate::shell::control) fn shape(
                 .map(|model| ModelSummary {
                     id: text(model, "id"),
                     name: text(model, "name"),
+                    settings: settings(model),
                 })
                 .filter(|model| {
                     needle.as_ref().is_none_or(|needle| {
@@ -102,5 +175,8 @@ pub(in crate::shell::control) fn shape(
             }
         })
         .collect();
-    ModelListOutput { providers }
+    ModelListOutput {
+        providers,
+        access_modes: access_modes(catalog),
+    }
 }

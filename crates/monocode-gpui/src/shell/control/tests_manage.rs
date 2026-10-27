@@ -10,8 +10,8 @@ use monocode_control::{
             SessionConfigureInput, SessionConfigureOutput, SessionDraftInput, SessionDraftOutput,
         },
         organize::{
-            FolderListOutput, ProjectInput, SessionArchiveOutput, SessionMoveInput,
-            SessionMoveOutput, SessionRenameInput, SessionRenameOutput,
+            FolderListOutput, ProjectInput, SessionArchiveInput, SessionArchiveOutput,
+            SessionMoveInput, SessionMoveOutput, SessionRenameInput, SessionRenameOutput,
         },
         rail::{
             ProjectArchiveOutput, ProjectReorderInput, ProjectReorderOutput, ProjectTarget,
@@ -69,13 +69,7 @@ fn session_draft_leaves_a_draft_once_and_keeps_the_persons(cx: &mut TestAppConte
             text: text.into(),
         })
     };
-    // Its history is still loading: not yet, but worth a retry.
-    let loading = run::<SessionDraftOutput>(window, draft("Too early"), cx).unwrap_err();
-    assert_eq!(
-        (loading.code, loading.retryable),
-        (ErrorCode::SessionBusy, true)
-    );
-    cx.run_until_parked();
+    // R1: its history is still loading, so the draft goes in once it has.
     let saved: SessionDraftOutput = run(window, draft("Look at the flaky test"), cx).unwrap();
     assert!(saved.saved);
     window
@@ -112,7 +106,10 @@ fn sessions_are_renamed_archived_restored_and_moved_into_folders(cx: &mut TestAp
     );
     let archived: SessionArchiveOutput = run(
         window,
-        Command::SessionArchive(SessionInput { session_id: a }),
+        Command::SessionArchive(SessionArchiveInput {
+            session_id: a,
+            stop: None,
+        }),
         cx,
     )
     .unwrap();
@@ -153,7 +150,7 @@ fn sessions_are_renamed_archived_restored_and_moved_into_folders(cx: &mut TestAp
         cx,
     )
     .unwrap();
-    assert_eq!(moved.folder_name, "Later");
+    assert_eq!(moved.folder_name.as_deref(), Some("Later"));
     let folders: FolderListOutput = run(
         window,
         Command::FolderList(ProjectInput {
@@ -167,7 +164,7 @@ fn sessions_are_renamed_archived_restored_and_moved_into_folders(cx: &mut TestAp
     for (folder, name, code) in [
         (Some("nope"), None, ErrorCode::NotFound),
         (
-            Some(moved.folder_id.as_str()),
+            moved.folder_id.as_deref(),
             Some("Both"),
             ErrorCode::InvalidInput,
         ),
@@ -177,6 +174,7 @@ fn sessions_are_renamed_archived_restored_and_moved_into_folders(cx: &mut TestAp
             session_id: a,
             folder_id: folder.map(str::to_owned),
             new_folder_name: name.map(str::to_owned),
+            ..SessionMoveInput::default()
         });
         assert_eq!(
             run::<SessionMoveOutput>(window, wrong, cx)
@@ -319,7 +317,10 @@ fn organising_needs_the_manage_scope(cx: &mut TestAppContext) {
     approve(window, &[(CLIENT, &[Scope::Read, Scope::Dispatch])], cx);
     let denied = run::<SessionArchiveOutput>(
         window,
-        Command::SessionArchive(SessionInput { session_id: b }),
+        Command::SessionArchive(SessionArchiveInput {
+            session_id: b,
+            stop: None,
+        }),
         cx,
     );
     assert_eq!(denied.unwrap_err().code, ErrorCode::ScopeDenied);

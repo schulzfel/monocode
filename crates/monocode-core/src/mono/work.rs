@@ -1,5 +1,9 @@
 //! Desktop work references belong to conversation blocks, not the Mono roster.
 //! Keep projection separate from persistence so opening a Mono never rewrites it.
+use crate::{
+    app_mcp::CONTROL_SERVER,
+    tool::{ToolCall, ToolState},
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -128,7 +132,8 @@ fn action(block: &Value) -> Option<String> {
     .or(block["text"].as_str())?;
     command_action(command)
 }
-/// Recognize the app CLI itself, including the desktop shell wrapper.
+/// Recognize the app CLI itself, the desktop app's `monocode` or the native
+/// `monocode-gpui`, including the desktop shell wrapper.
 pub fn command_action(command: &str) -> Option<String> {
     let mut parts = words(command.trim())?;
     if parts.len() == 3
@@ -141,22 +146,120 @@ pub fn command_action(command: &str) -> Option<String> {
     {
         parts = words(&parts[2])?;
     }
-    if parts
+    let executable = parts
         .first()?
         .rsplit(['/', '\\'])
         .next()?
-        .trim_end_matches(".exe")
-        != "monocode"
-        || parts.get(1)? != "app"
-    {
+        .trim_end_matches(".exe");
+    if !matches!(executable, "monocode" | "monocode-gpui") || parts.get(1)? != "app" {
         return None;
     }
-    for flags in parts[3.min(parts.len())..].chunks(2) {
-        if flags.len() != 2 || !["--json", "--input", "--request-id"].contains(&flags[0].as_str()) {
+    let mut flags = parts[3.min(parts.len())..].iter();
+    while let Some(flag) = flags.next() {
+        // The input object may also be passed as it is.
+        if flag.starts_with('{') {
+            continue;
+        }
+        if !["--json", "--input", "--request-id"].contains(&flag.as_str()) || flags.next().is_none()
+        {
             return None;
         }
     }
     parts.get(2).cloned()
+}
+
+/// What a tool call did to a MonoCode session, for a Mono's launch chips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionCall {
+    /// Started one: `session_start`, or the CLI's old `sessions.start`.
+    Start,
+    /// Sent one a message: `session_send`, or `sessions.send`.
+    Send,
+}
+
+/// The session call a completed tool row made, with the sessions its
+/// successful results name: a run of the app CLI ([`command_action`]),
+/// whose output holds one receipt or one per line, or a call of the
+/// `monocode` MCP server's tool, as its provider recorded it.
+pub fn session_call(tool: &ToolCall) -> Option<(SessionCall, Vec<i64>)> {
+    if tool.state != ToolState::Completed {
+        return None;
+    }
+    let input = serde_json::from_str::<Value>(&tool.input).unwrap_or_default();
+    if let Some(action) = input["command"].as_str().and_then(command_action) {
+        let call = match action.as_str() {
+            "sessions.start" | "session_start" => SessionCall::Start,
+            "sessions.send" | "session_send" => SessionCall::Send,
+            _ => return None,
+        };
+        return Some((call, receipt_sessions(&tool.output)));
+    }
+    let call = match tool.mcp_tool()? {
+        (CONTROL_SERVER, "session_start") => SessionCall::Start,
+        (CONTROL_SERVER, "session_send") => SessionCall::Send,
+        _ => return None,
+    };
+    Some((
+        call,
+        mcp_session(call, &input, &tool.output)
+            .into_iter()
+            .collect(),
+    ))
+}
+
+/// The sessions the successful CLI receipts in `output` name.
+fn receipt_sessions(output: &str) -> Vec<i64> {
+    let receipts = serde_json::from_str::<Value>(output)
+        .map(|v| vec![v])
+        .unwrap_or_else(|_| {
+            output
+                .lines()
+                .filter_map(|line| serde_json::from_str(line.trim()).ok())
+                .collect()
+        });
+    receipts
+        .iter()
+        .filter(|value| value["ok"] == true)
+        .filter_map(|value| {
+            value["result"]["sessionId"]
+                .as_i64()
+                .or_else(|| session_handle(&value["result"]["id"]))
+                .or_else(|| {
+                    (value["result"]["submitted"] == true)
+                        .then(|| session_handle(&value["result"]["sessionId"]))
+                        .flatten()
+                })
+        })
+        .collect()
+}
+
+/// The session a successful MCP `call` with `input` names in its recorded
+/// `output`: the structured result's `sessionId`, within the whole result
+/// as Codex records it or alone as the result's text. A provider that keeps
+/// only the relay's one line of text gets it from that line for a start
+/// ("Started session 7 (…"), and from the input for a send.
+fn mcp_session(call: SessionCall, input: &Value, output: &str) -> Option<i64> {
+    let output = serde_json::from_str::<Value>(output).unwrap_or_else(|_| json!(output));
+    if output["isError"] == true {
+        return None;
+    }
+    let result = output.get("structuredContent").unwrap_or(&output);
+    if let Some(id) = result["sessionId"].as_i64() {
+        return Some(id);
+    }
+    match call {
+        SessionCall::Start => {
+            let rest = output
+                .as_str()?
+                .trim_start()
+                .strip_prefix("Started session ")?;
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            rest[..end].parse().ok()
+        }
+        SessionCall::Send => input["sessionId"].as_i64(),
+    }
 }
 
 /// One receipt list per source block. Listings supply details for accepted sends
@@ -315,6 +418,35 @@ mod tests {
             .next()
             .is_none());
         assert!(block_launches(&[send])[0].is_empty());
+    }
+    /// F-8: the native `monocode-gpui app` command is the app CLI too, by
+    /// operation or old name, quoted, wrapped in a shell or given the input
+    /// object as it is; a mention or a pipeline is not a call.
+    #[test]
+    fn the_native_command_is_recognized_like_the_desktop_one() {
+        for (command, action) in [
+            ("monocode app sessions.start --json {}", "sessions.start"),
+            (
+                "'/Applications/Mono Code.app/Contents/MacOS/monocode-gpui' app session_start --json '{}'",
+                "session_start",
+            ),
+            (
+                "/bin/zsh -lc \"monocode-gpui app sessions.send --json '{}' --request-id r1\"",
+                "sessions.send",
+            ),
+            (r#"C:\\MonoCode\\monocode-gpui.exe app session_start {"prompt":"x"}"#, "session_start"),
+        ] {
+            assert_eq!(command_action(command).as_deref(), Some(action), "{command}");
+        }
+        for command in [
+            "echo monocode-gpui app session_start",
+            "monocode-gpui app session_start --json {} | jq .",
+            "monocode-gpui app session_start --json",
+            "monocode-gpui app session_start --verbose {}",
+            "monocode-gpuix app session_start",
+        ] {
+            assert_eq!(command_action(command), None, "{command}");
+        }
     }
     #[test]
     fn reconcile_work_retains_native_documents_monitoring_and_desktop_removals() {

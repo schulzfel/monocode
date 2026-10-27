@@ -132,9 +132,10 @@ impl Shell {
         for id in ids {
             if input.session_id.is_some_and(|wanted| wanted != id)
                 || self.control_session(id, cx).is_err()
-                || project
-                    .as_ref()
-                    .is_some_and(|p| self.session_metadata(id, cx).summary.cwd != *p)
+                || project.as_ref().is_some_and(|p| {
+                    monocode_core::files::path_key(&self.session_metadata(id, cx).summary.cwd)
+                        != monocode_core::files::path_key(p)
+                })
             {
                 continue;
             }
